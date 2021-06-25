@@ -88,6 +88,13 @@ class InputConfig(BaseConfigSection):
         Used to make minor channelized corrections to account for slight systematic errors not captured in calibration.
         """
 
+        self._fixed_state_file_type = str
+        self.fixed_state_file = None
+        """
+        str: Pre-determined state vectors to be used during the inversion.  Bands much be labeled to match the name of
+        the state vectors elements to replace.
+        """
+
         self.set_config_options(sub_configdic)
 
     def _check_config_validity(self) -> List[str]:

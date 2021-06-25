@@ -384,13 +384,20 @@ class IO:
             if np.all(abs(data[source] - self.input_datasets[source].flag) < eps):
                 return None
 
+        if 'fixed_state_file' in self.input_datasets:
+            fixed_names = np.array(self.input_datasets['fixed_state_file'].meta['band names'])
+            fixed_state = (fixed_names, data['fixed_state_file'])
+        else:
+            fixed_state = None
+
         # We build the geometry object for this spectrum.  For files not
         # specified in the input configuration block, the associated entries
         # will be 'None'. The Geometry object will use reasonable defaults.
         geom = Geometry(obs=data['obs_file'],
                         glt=data['glt_file'],
                         loc=data['loc_file'],
-                        bg_rfl=data['background_reflectance_file'])
+                        bg_rfl=data['background_reflectance_file'],
+                        fixed_state=fixed_state)
 
         self.current_input_data.geom = geom
         self.current_input_data.reference_reflectance = data['reference_reflectance_file']

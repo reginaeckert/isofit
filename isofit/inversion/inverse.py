@@ -90,6 +90,7 @@ class Inversion:
             self.inds_preseed = []
 
         self.x_fixed = None
+        self.inds_geom_fixed = None
 
         # Set least squares params that come from the forward model
         self.least_squares_params = {
@@ -278,6 +279,12 @@ class Inversion:
         self.counts = 0
         costs, solutions = [], []
 
+        if geom.fixed_state is not None and self.inds_geom_fixed is None:
+            matched_idx = np.array([self.fm.statevec.index(fs) for fs in geom.fixed_state[0]])
+            self.inds_fixed = np.unique(np.append(self.inds_fixed, matched_idx))
+            self.inds_free = np.setdiff1d(self.inds_free, matched_idx, True)
+            self.inds_geom_fixed = np.array([self.inds_fixed.tolist().index(x) for x in matched_idx])
+
         # Simulations are easy - return the initial state vector
         if self.mode == 'simulation':
             self.fm.surface.rfl = meas
@@ -293,6 +300,9 @@ class Inversion:
             if self.grid_as_starting_points is False:
                 self.x_fixed = combo
             trajectory = []
+
+            if geom.fixed_state is not None:
+                self.x_fixed[self.inds_geom_fixed] = geom.fixed_state[1]
 
             # Calculate the initial solution, if needed.
             x0 = invert_simple(self.fm, meas, geom)
