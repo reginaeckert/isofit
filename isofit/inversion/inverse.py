@@ -281,9 +281,15 @@ class Inversion:
 
         if geom.fixed_state is not None and self.inds_geom_fixed is None:
             matched_idx = np.array([self.fm.statevec.index(fs) for fs in geom.fixed_state[0]])
-            self.inds_fixed = np.unique(np.append(self.inds_fixed, matched_idx))
+            self.inds_fixed = np.unique(np.append(self.inds_fixed, matched_idx)).astype(int)
             self.inds_free = np.setdiff1d(self.inds_free, matched_idx, True)
             self.inds_geom_fixed = np.array([self.inds_fixed.tolist().index(x) for x in matched_idx])
+
+            # reset the least squares params based on the new indices
+            self.least_squares_params['bounds'] = (self.fm.bounds[0][self.inds_free],
+                                                   self.fm.bounds[1][self.inds_free])
+
+            self.least_squares_params['x_scale'] = self.fm.scale[self.inds_free]
 
         # Simulations are easy - return the initial state vector
         if self.mode == 'simulation':
@@ -302,7 +308,10 @@ class Inversion:
             trajectory = []
 
             if geom.fixed_state is not None:
-                self.x_fixed[self.inds_geom_fixed] = geom.fixed_state[1]
+                if self.x_fixed is None:
+                    self.x_fixed = geom.fixed_state[1]
+                else:
+                    self.x_fixed[self.inds_geom_fixed] = geom.fixed_state[1]
 
             # Calculate the initial solution, if needed.
             x0 = invert_simple(self.fm, meas, geom)
@@ -322,7 +331,7 @@ class Inversion:
             x = self.full_statevector(x0)
 
             # Regardless of anything we did for the heuristic guess, bring the
-            # static preseed back into play (only does anything if inds_preseed
+            # static preseed or state back into play (only does anything if inds_preseed
             # is not blank)
             if len(self.inds_preseed) > 0:
                 x0[self.inds_preseed] = combo
@@ -367,6 +376,7 @@ class Inversion:
                 solutions.append(trajectory)
                 costs.append(9e99)
 
+        #logging.info(f'Number of iterations: {len(costs)}')
         final_solution = np.array(solutions[np.argmin(costs)])
         return final_solution
 
