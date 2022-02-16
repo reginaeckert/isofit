@@ -61,8 +61,8 @@ class VectorInterpolator:
             self.single_point_data = data
 
         # expand grid dimensionality as needed
-        [radian_locations] = np.where(self.lut_interp_types == 'd')
-        [degree_locations] = np.where(self.lut_interp_types == 'r')
+        [radian_locations] = np.where(self.lut_interp_types == 'r')
+        [degree_locations] = np.where(self.lut_interp_types == 'd')
         angle_locations = np.hstack([radian_locations, degree_locations])
         angle_types = np.hstack(
             [self.lut_interp_types[radian_locations],
@@ -78,8 +78,8 @@ class VectorInterpolator:
                 grid_subset_cosin = np.cos(original_grid_subset)
                 grid_subset_sin = np.sin(original_grid_subset)
             elif (angle_types[_angle_loc] == 'd'):
-                grid_subset_cosin = np.cos(original_grid_subset / 180. * np.pi)
-                grid_subset_sin = np.sin(original_grid_subset / 180. * np.pi)
+                grid_subset_cosin = np.cos(np.deg2rad(original_grid_subset))
+                grid_subset_sin = np.sin(np.deg2rad(original_grid_subset))
 
             # handle the fact that the grid may no longer be in order
             grid_subset_cosin_order = np.argsort(grid_subset_cosin)
@@ -142,8 +142,8 @@ class VectorInterpolator:
                 x[:, i + 1 + offset_count] = np.sin(points[i])
                 offset_count += 1
             elif self.lut_interp_types[i] == 'd':
-                x[:, i + offset_count] = np.cos(points[i] / 180. * np.pi)
-                x[:, i + 1 + offset_count] = np.sin(points[i] / 180. * np.pi)
+                x[:, i + offset_count] = np.cos(np.deg2rad(points[i]))
+                x[:, i + 1 + offset_count] = np.sin(np.deg2rad(points[i]))
                 offset_count += 1
 
         # This last dimension is always an integer so no
@@ -263,7 +263,7 @@ def svd_inv_sqrt(C: np.array, hashtable: OrderedDict = None, max_hash_size: int 
 
     # If there is a hash table, cache our solution.  Bound the total cache
     # size by removing any extra items in FIFO order.
-    if hashtable is not None:
+    if (hashtable is not None) and (max_hash_size is not None):
         hashtable[h] = (Cinv, Cinv_sqrt)
         while len(hashtable) > max_hash_size:
             hashtable.popitem(last=False)
@@ -517,8 +517,6 @@ def spectral_response_function(response_range: np.array, mu: float, sigma: float
     return srf
 
 
-
-
 def combos(inds: List[List[float]]) -> np.array:
     """Return all combinations of indices in a list of index sublists.
     For example, the call::
@@ -570,3 +568,25 @@ def conditional_gaussian(mu: np.array, C: np.array, window: np.array, remain: np
     conditional_cov = C22 - C21 @ Cinv @ C12
     return conditional_mean, conditional_cov
 
+def envi_header(inputpath):
+    """
+    Convert a envi binary/header path to a header, handling extensions
+    Args:
+        inputpath: path to envi binary file
+    Returns:
+        str: the header file associated with the input reference.
+
+    """
+    if os.path.splitext(inputpath)[-1] == '.img' or os.path.splitext(inputpath)[-1] == '.dat' or os.path.splitext(inputpath)[-1] == '.raw':
+        # headers could be at either filename.img.hdr or filename.hdr.  Check both, return the one that exists if it
+        # does, if not return the latter (new file creation presumed).
+        hdrfile = os.path.splitext(inputpath)[0] + '.hdr'
+        if os.path.isfile(hdrfile):
+            return hdrfile
+        elif os.path.isfile(inputpath + '.hdr'):
+            return inputpath + '.hdr'
+        return hdrfile
+    elif os.path.splitext(inputpath)[-1] == '.hdr':
+        return inputpath
+    else:
+        return inputpath + '.hdr'
