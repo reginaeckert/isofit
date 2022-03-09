@@ -76,6 +76,8 @@ class Isofit:
 
         if self.config.implementation.debug_mode is False:
             ray.init(**rayargs)
+        else:
+            print('Debug mode active.')
 
         self.workers = None
 
@@ -93,35 +95,44 @@ class Isofit:
             * a single number, in which case it is interpreted as a row
             * a comma-separated pair, in which case it is interpreted as a
               row/column tuple (i.e. a single spectrum)
+            * a comma-separated triplet, in which case it is interpreted as
+              a row range in the order (line_start, line_end, 0), for all columns 
+              all values are inclusive.
             * a comma-separated quartet, in which case it is interpreted as
               a row, column range in the order (line_start, line_end, sample_start,
               sample_end) all values are inclusive.
 
             If none of the above, the whole cube will be analyzed.
         """
-
+        
         logging.info("Building first forward model, will generate any necessary LUTs")
         fm = ForwardModel(self.config)
+        io = IO(self.config, fm) # Need the n_rows, n_cols for row_column as well
         if row_column is not None:
             ranges = row_column.split(',')
             if len(ranges) == 1:
-                self.rows, self.cols = [int(ranges[0])], None
+                # Single row, all columns
+                self.rows, self.cols = [int(ranges[0])], range(io.n_cols)
             if len(ranges) == 2:
-                row_start, row_end = ranges
+                # Single row, col (one spectrum)
+                self.rows, self.cols = [int(ranges[0])], [int(ranges[1])]
+            if len(ranges) == 3:
+                # Row range, all columns
+                row_start, row_end, col_blank = ranges
                 self.rows, self.cols = range(
-                    int(row_start), int(row_end)), None
+                    int(row_start), int(row_end)), range(io.n_cols)
             elif len(ranges) == 4:
+                # Row, column range
                 row_start, row_end, col_start, col_end = ranges
                 self.rows = range(int(row_start), int(row_end) + 1)
                 self.cols = range(int(col_start), int(col_end) + 1)
         else:
-            io = IO(self.config, fm)
+            #io = IO(self.config, fm)
             self.rows = range(io.n_rows)
             self.cols = range(io.n_cols)
-            del io
+        del io # Delete when we're done
 
         index_pairs = np.vstack([x.flatten(order='f') for x in np.meshgrid(self.rows, self.cols)]).T
-
         n_iter = index_pairs.shape[0]
 
         if self.config.implementation.n_cores is None:
@@ -161,9 +172,10 @@ class Isofit:
         else:
             self.workers.run_set_of_spectra(index_pairs)
 
-
-
         total_time = time.time() - start_time
+        print(total_time)
+        print(n_iter)
+        print(n_workers)
         logging.info(f'Inversions complete.  {round(total_time,2)}s total, {round(n_iter/total_time,4)} spectra/s, '
                      f'{round(n_iter/total_time/n_workers,4)} spectra/s/core')
 
