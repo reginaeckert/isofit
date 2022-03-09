@@ -76,8 +76,6 @@ class Isofit:
 
         if self.config.implementation.debug_mode is False:
             ray.init(**rayargs)
-        else:
-            print('Debug mode active.')
 
         self.workers = None
 
@@ -104,6 +102,11 @@ class Isofit:
 
             If none of the above, the whole cube will be analyzed.
         """
+        
+        logging.info(f'********** BEGINNING LOG FOR RUN ON {time.asctime(time.gmtime())} UTC **********')
+        if self.config.implementation.debug_mode is True:
+            logging.info('Debug mode active')
+            
         
         logging.info("Building first forward model, will generate any necessary LUTs")
         fm = ForwardModel(self.config)
@@ -173,9 +176,7 @@ class Isofit:
             self.workers.run_set_of_spectra(index_pairs)
 
         total_time = time.time() - start_time
-        print(total_time)
-        print(n_iter)
-        print(n_workers)
+
         logging.info(f'Inversions complete.  {round(total_time,2)}s total, {round(n_iter/total_time,4)} spectra/s, '
                      f'{round(n_iter/total_time/n_workers,4)} spectra/s/core')
 
