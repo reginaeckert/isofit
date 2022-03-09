@@ -54,6 +54,8 @@ class Isofit:
         self.loglevel = level
         self.logfile = logfile
         logging.basicConfig(format='%(levelname)s:%(message)s', level=self.loglevel, filename=self.logfile)
+        
+        logging.info(f'********** BEGINNING LOG FOR RUN ON {time.asctime(time.gmtime())} UTC **********')
 
         self.rows = None
         self.cols = None
@@ -76,6 +78,8 @@ class Isofit:
 
         if self.config.implementation.debug_mode is False:
             ray.init(**rayargs)
+        else:
+            logging.info('Debug mode active')
 
         self.workers = None
 
@@ -102,11 +106,6 @@ class Isofit:
 
             If none of the above, the whole cube will be analyzed.
         """
-        
-        logging.info(f'********** BEGINNING LOG FOR RUN ON {time.asctime(time.gmtime())} UTC **********')
-        if self.config.implementation.debug_mode is True:
-            logging.info('Debug mode active')
-            
         
         logging.info("Building first forward model, will generate any necessary LUTs")
         fm = ForwardModel(self.config)
