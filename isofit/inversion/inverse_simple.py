@@ -49,7 +49,7 @@ def heuristic_atmosphere(RT: RadiativeTransfer, instrument, x_RT, x_instrument, 
             my_RT = rte
             break
     if not my_RT:
-        raise ValueError('No suiutable RT object for initialization')
+        raise ValueError('No suitable RT object for initialization')
 
     # Band ratio retrieval of H2O.  Depending on the radiative transfer
     # model we are using, this state parameter could go by several names.
@@ -69,7 +69,7 @@ def heuristic_atmosphere(RT: RadiativeTransfer, instrument, x_RT, x_instrument, 
 
         # We iterate through every possible grid point in the lookup table,
         # calculating the band ratio that we would see if this were the
-        # atmospheric H2O content.  It assumes that defaults for all other
+        # atmospheric H2O content.  It assumes the defaults for all other
         # atmospheric parameters (such as aerosol, if it is there).
         for h2o in my_RT.lut_grids[ind_lut]:
 
@@ -104,10 +104,12 @@ def invert_algebraic(surface, RT: RadiativeTransfer, instrument, x_surface,
         x_RT, x_instrument, meas, geom):
     """Inverts radiance algebraically using Lambertian assumptions to get a 
         reflectance."""
-
+    
     # Get atmospheric optical parameters (possibly at high
     # spectral resolution) and resample them if needed.
     rhi = RT.get_shared_rtm_quantities(x_RT, geom)
+    #Returns atmospheric optical parameters for the values at x_RT
+    
     wl, fwhm = instrument.calibration(x_instrument)
     rhoatm = instrument.sample(x_instrument, RT.wl, rhi['rhoatm'])
     transm = instrument.sample(x_instrument, RT.wl, rhi['transm'])
@@ -153,13 +155,29 @@ def invert_simple(forward, meas, geom):
     tir_present = False
     if any(forward.surface.wl > 2600):
         tir_present = True 
-
-    # First step is to get the atmosphere. We start from the initial state
-    # and estimate atmospheric terms using traditional heuristics.
+        
+    h20_fixed = False
+    if geom.fixed_state is not None and any(fs in ["H2OSTR", "h2o"] for fs in geom.fixed_state[0]):
+        h20_fixed = True
+    # A slightly faster, but less readable, version of this list comparison is:
+    # bool(set(['H2OSTR', 'h2o']) & set(geom.fixed_state[0]))
+                                            
     x = forward.init.copy()
-    x_surface, x_RT, x_instrument = forward.unpack(x)
+    
+    # First step is to get the atmosphere. 
+    # First we check if we have fixed the state of atmospheric water vapor
+    ### Since heuristic_atmosphere() only searches the LUT grid for 
+    ### water vapor and leaves all other atmospheric parameters set to 
+    ### the x_RT values available here, only if water vapor is a fixed_state
+    ### do we not need to run the heuristic_atmosphere()
 
-    if vswir_present:
+    if vswir_present and not h20_fixed:    
+        # If geom.fixed_state is None or if it does not include
+        # any of the strings for water vapor,
+        # we run the heuristic atmosphere guess
+    
+        x_surface, x_RT, x_instrument = forward.unpack(x)
+    
         x[forward.idx_RT] = heuristic_atmosphere(RT, instrument, 
                                                  x_RT, x_instrument,  meas, geom)
 

@@ -56,6 +56,7 @@ class Isofit:
         logging.basicConfig(format='%(levelname)s:%(message)s', level=self.loglevel, filename=self.logfile)
         
         logging.info(f'********** BEGINNING LOG FOR RUN ON {time.asctime(time.gmtime())} UTC **********')
+        logging.info(f'Reading from config file at: {config_file}')
 
         self.rows = None
         self.cols = None
