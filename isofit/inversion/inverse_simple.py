@@ -177,7 +177,6 @@ def invert_simple(forward, meas, geom):
         # we run the heuristic atmosphere guess
     
         x_surface, x_RT, x_instrument = forward.unpack(x)
-    
         x[forward.idx_RT] = heuristic_atmosphere(RT, instrument, 
                                                  x_RT, x_instrument,  meas, geom)
 

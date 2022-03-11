@@ -290,6 +290,11 @@ class Inversion:
                                                    self.fm.bounds[1][self.inds_free])
 
             self.least_squares_params['x_scale'] = self.fm.scale[self.inds_free]
+        
+        # Update the initialization to the statevector
+        if geom.fixed_state is not None:
+            matched_idx = np.array([self.fm.statevec.index(fs) for fs in geom.fixed_state[0]])
+            self.fm.init[matched_idx] = geom.fixed_state[1]
 
         # Simulations are easy - return the initial state vector
         if self.mode == 'simulation':
@@ -375,7 +380,7 @@ class Inversion:
                 logging.warning('Optimization failed to converge')
                 solutions.append(trajectory)
                 costs.append(9e99)
-
+        #logging.info(f'Num func evals: {xopt.nfev}, num jac evals: {xopt.njev}')
         #logging.info(f'Number of iterations: {len(costs)}')
         final_solution = np.array(solutions[np.argmin(costs)])
         return final_solution
