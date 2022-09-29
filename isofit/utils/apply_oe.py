@@ -17,6 +17,7 @@ from sklearn import mixture
 import subprocess
 from sys import platform
 from typing import List
+import time
 
 from isofit.utils import segment, extractions, empirical_line
 from isofit.core import isofit, common
@@ -122,8 +123,13 @@ def main(rawargs=None):
     parser.add_argument('--ray_temp_dir', type=str, default='/tmp/ray')
     parser.add_argument('--emulator_base', type=str, default=None)
     parser.add_argument('--segmentation_size', type=int, default=40)
+    parser.add_argument('--flag_skip_inference', action='store_true')
 
     args = parser.parse_args(rawargs)
+    
+    start_time = time.time()
+    ckpt_time = [start_time]
+    ckpt_tag = ['start_all']
 
     if args.sensor not in ['ang', 'avcl', 'neon', 'prism', 'emit', 'hyp']:
         if args.sensor[:3] != 'NA-':
@@ -139,7 +145,13 @@ def main(rawargs=None):
         logging.basicConfig(format='%(message)s', level=args.logging_level)
     else:
         logging.basicConfig(format='%(message)s', level=args.logging_level, filename=args.log_file)
-
+        
+    logging.info(f'********** BEGINNING APPLY_OE AT {time.asctime(time.gmtime(start_time))} UTC **********')
+    logging.info('Apply_oe info: Setting up environment')
+    
+    logging.info('Apply_oe info: Presolve = {}'.format(args.presolve))
+    logging.info('Apply_oe info: rdn_factors_path = {}'.format(args.rdn_factors_path))
+    
     rdn_dataset = gdal.Open(args.input_radiance, gdal.GA_ReadOnly)
     rdn_size = (rdn_dataset.RasterXSize, rdn_dataset.RasterYSize)
     del rdn_dataset
@@ -230,20 +242,19 @@ def main(rawargs=None):
             to_rem = elevation_lut_grid[elevation_lut_grid < 0].copy()
             elevation_lut_grid[ elevation_lut_grid< 0] = 0
             elevation_lut_grid = np.unique(elevation_lut_grid)
-            logging.info("Scene contains target lut grid elements < 0 km, and uses 6s (via sRTMnet).  6s does not "
-                         f"support targets below sea level in km units.  Setting grid points {to_rem} to 0.")
+            logging.info(f"Apply_oe info: Scene contains target lut grid elements < 0 km, and uses 6s (via sRTMnet).\n6s does not support targets below sea level in km units. Setting grid points {to_rem} to 0.")
 
     # Need a 180 - here, as this is already in MODTRAN convention
     mean_altitude_km = mean_elevation_km + np.cos(np.deg2rad(180 - mean_to_sensor_zenith)) * mean_path_km
 
-    logging.info('Observation means:')
-    logging.info(f'Path (km): {mean_path_km}')
-    logging.info(f'To-sensor Zenith (deg): {mean_to_sensor_zenith}')
-    logging.info(f'To-sensor Azimuth (deg): {mean_to_sensor_azimuth}')
-    logging.info(f'Altitude (km): {mean_altitude_km}')
+    logging.info('Apply_oe info: Observation means:')
+    logging.info(f'Apply_oe info: Path (km): {mean_path_km}')
+    logging.info(f'Apply_oe info: To-sensor Zenith (deg): {mean_to_sensor_zenith}')
+    logging.info(f'Apply_oe info: To-sensor Azimuth (deg): {mean_to_sensor_azimuth}')
+    logging.info(f'Apply_oe info: Altitude (km): {mean_altitude_km}')
 
     if args.emulator_base is not None and mean_altitude_km > 99:
-        logging.info('Adjusting altitude to 99 km for integration with 6S, because emulator is chosen.')
+        logging.info('Apply_oe info: Adjusting altitude to 99 km for integration with 6S, because emulator is chosen.')         
         mean_altitude_km = 99
 
 
@@ -253,27 +264,51 @@ def main(rawargs=None):
         uncorrelated_radiometric_uncertainty = 0
     else:
         uncorrelated_radiometric_uncertainty = UNCORRELATED_RADIOMETRIC_UNCERTAINTY 
-
+     
+    logging.info('Apply_oe info: Done with environment set up')
+    ckpt_time.append(time.time())
+    ckpt_tag.append('end_env')
+    logging.info(f'Apply_oe checkpoint: {len(ckpt_time)-1} ({ckpt_tag[-1]}), sub time elapsed: {ckpt_time[-1]-ckpt_time[-2]:.4f} s, total time elapsed: {ckpt_time[-1]-ckpt_time[0]:.4f} s')
+    
     # Superpixel segmentation
     if args.empirical_line == 1:
         if not exists(paths.lbl_working_path) or not exists(paths.radiance_working_path):
-            logging.info('Segmenting...')
+            logging.info('Apply_oe info: Segmenting for empirical line')
+            ckpt_time.append(time.time())
+            ckpt_tag.append('start_seg')
+            logging.info(f'Apply_oe checkpoint: {len(ckpt_time)-1} ({ckpt_tag[-1]}), sub time elapsed: {ckpt_time[-1]-ckpt_time[-2]:.4f} s, total time elapsed: {ckpt_time[-1]-ckpt_time[0]:.4f} s')
+            
             segment(spectra=(paths.radiance_working_path, paths.lbl_working_path),
                     nodata_value=-9999, npca=5, segsize=args.segmentation_size, nchunk=CHUNKSIZE,
                     n_cores=args.n_cores, loglevel=args.logging_level, logfile=args.log_file)
+        
+        logging.info('Apply_oe info: Done segmenting, beginning extractions for empirical line')
+        ckpt_time.append(time.time())
+        ckpt_tag.append('end_seg_start_extr')
+        logging.info(f'Apply_oe checkpoint: {len(ckpt_time)-1} ({ckpt_tag[-1]}), sub time elapsed: {ckpt_time[-1]-ckpt_time[-2]:.4f} s, total time elapsed: {ckpt_time[-1]-ckpt_time[0]:.4f} s')    
 
         # Extract input data per segment
         for inp, outp in [(paths.radiance_working_path, paths.rdn_subs_path),
                           (paths.obs_working_path, paths.obs_subs_path),
                           (paths.loc_working_path, paths.loc_subs_path)]:
             if not exists(outp):
-                logging.info('Extracting ' + outp)
+                logging.info('Apply_oe info: Extracting ' + outp)
                 extractions(inputfile=inp, labels=paths.lbl_working_path, output=outp,
                             chunksize=CHUNKSIZE, flag=-9999, n_cores=args.n_cores,
                             loglevel=args.logging_level, logfile=args.log_file)
+                
+        logging.info('Apply_oe info: Done extracting for empirical line')
+        ckpt_time.append(time.time())
+        ckpt_tag.append('end_extr')
+        logging.info(f'Apply_oe checkpoint: {len(ckpt_time)-1} ({ckpt_tag[-1]}), sub time elapsed: {ckpt_time[-1]-ckpt_time[-2]:.4f} s, total time elapsed: {ckpt_time[-1]-ckpt_time[0]:.4f} s')
 
+    logging.info('Apply_oe info: Beginning H2O presolve')
+    ckpt_time.append(time.time())
+    ckpt_tag.append('start_h2o')
+    logging.info(f'Apply_oe checkpoint: {len(ckpt_time)-1} ({ckpt_tag[-1]}), sub time elapsed: {ckpt_time[-1]-ckpt_time[-2]:.4f} s, total time elapsed: {ckpt_time[-1]-ckpt_time[0]:.4f} s')
+        
     if args.presolve == 1:
-
+        
         # write modtran presolve template
         write_modtran_template(atmosphere_type=args.atmosphere_type, fid=paths.fid, altitude_km=mean_altitude_km,
                                dayofyear=dayofyear, latitude=mean_latitude, longitude=mean_longitude,
@@ -290,13 +325,13 @@ def main(rawargs=None):
         if not exists(envi_header(paths.h2o_subs_path)) or not exists(paths.h2o_subs_path):
             # Write the presolve connfiguration file
             h2o_grid = np.linspace(0.01, max_water - 0.01, 10).round(2)
-            logging.info(f'Pre-solve H2O grid: {h2o_grid}')
-            logging.info('Writing H2O pre-solve configuration file.')
+            logging.info(f'Apply_oe info: Pre-solve H2O grid: {h2o_grid}')
+            logging.info('Apply_oe info: Writing H2O pre-solve configuration file.')
             build_presolve_config(paths, h2o_grid, args.n_cores, args.empirical_line == 1, args.surface_category,
                 args.emulator_base, uncorrelated_radiometric_uncertainty)
 
             # Run modtran retrieval
-            logging.info('Run ISOFIT initial guess')
+            logging.info('Apply_oe info: Run ISOFIT initial guess')
             retrieval_h2o = isofit.Isofit(paths.h2o_config_path, level='INFO', logfile=args.log_file)
             retrieval_h2o.run()
             del retrieval_h2o
@@ -308,7 +343,7 @@ def main(rawargs=None):
                     logging.info(cmd)
                     os.system(cmd)
         else:
-            logging.info('Existing h2o-presolve solutions found, using those.')
+            logging.info('Apply_oe info: Existing h2o-presolve solutions found, using those.')
 
         h2o = envi.open(envi_header(paths.h2o_subs_path))
         h2o_est = h2o.read_band(-1)[:].flatten()
@@ -320,25 +355,32 @@ def main(rawargs=None):
         lut_params.h2o_range[0] = max(lut_params.h2o_min, p05 - margin)
         lut_params.h2o_range[1] = min(max_water, max(lut_params.h2o_min, p95 + margin))
 
+    logging.info('Apply_oe info: Done with H2O presolve')
+    ckpt_time.append(time.time())
+    ckpt_tag.append('end_h2o')
+    logging.info(f'Apply_oe checkpoint: {len(ckpt_time)-1} ({ckpt_tag[-1]}), sub time elapsed: {ckpt_time[-1]-ckpt_time[-2]:.4f} s, total time elapsed: {ckpt_time[-1]-ckpt_time[0]:.4f} s')
+        
     h2o_lut_grid = lut_params.get_grid(lut_params.h2o_range[0], lut_params.h2o_range[1], lut_params.h2o_spacing, lut_params.h2o_spacing_min)
 
-    logging.info('Full (non-aerosol) LUTs:')
-    logging.info(f'Elevation: {elevation_lut_grid}')
-    logging.info(f'To-sensor azimuth: {to_sensor_azimuth_lut_grid}')
-    logging.info(f'To-sensor zenith: {to_sensor_zenith_lut_grid}')
-    logging.info(f'H2O Vapor: {h2o_lut_grid}')
+    logging.info('Apply_oe info: Full (non-aerosol) LUTs:')
+    logging.info(f'Apply_oe info: Elevation: {elevation_lut_grid}')
+    logging.info(f'Apply_oe info: To-sensor azimuth: {to_sensor_azimuth_lut_grid}')
+    logging.info(f'Apply_oe info: To-sensor zenith: {to_sensor_zenith_lut_grid}')
+    logging.info(f'Apply_oe info: H2O Vapor: {h2o_lut_grid}')
 
-    logging.info(paths.state_subs_path)
+    logging.info(f'Apply_oe info: state subs path {paths.state_subs_path}')
     if not exists(paths.state_subs_path) or \
             not exists(paths.uncert_subs_path) or \
             not exists(paths.rfl_subs_path):
+        
+        logging.info('Apply_oe info: Setting up Isofit retrieval')
 
         write_modtran_template(atmosphere_type=args.atmosphere_type, fid=paths.fid, altitude_km=mean_altitude_km,
                                dayofyear=dayofyear, latitude=mean_latitude, longitude=mean_longitude,
                                to_sensor_azimuth=mean_to_sensor_azimuth, to_sensor_zenith=mean_to_sensor_zenith,
                                gmtime=gmtime, elevation_km=mean_elevation_km, output_file=paths.modtran_template_path)
 
-        logging.info('Writing main configuration file.')
+        logging.info('Apply_oe info: Writing main configuration file.')
         build_main_config(paths, lut_params, h2o_lut_grid, elevation_lut_grid, to_sensor_azimuth_lut_grid,
                           to_sensor_zenith_lut_grid, mean_latitude, mean_longitude, dt, 
                           args.empirical_line == 1, args.n_cores, args.surface_category,
@@ -346,10 +388,18 @@ def main(rawargs=None):
                           args.segmentation_size)
 
         # Run modtran retrieval
-        logging.info('Running ISOFIT with full LUT')
+        logging.info('Apply_oe info: Running ISOFIT with full LUT')
+        ckpt_time.append(time.time())
+        ckpt_tag.append('start_fulliso')
+        logging.info(f'Apply_oe checkpoint: {len(ckpt_time)-1} ({ckpt_tag[-1]}), sub time elapsed: {ckpt_time[-1]-ckpt_time[-2]:.4f} s, total time elapsed: {ckpt_time[-1]-ckpt_time[0]:.4f} s')
+        
         retrieval_full = isofit.Isofit(paths.modtran_config_path, level='INFO', logfile=args.log_file)
         retrieval_full.run()
         del retrieval_full
+        logging.info('Apply_oe info: Isofit procedure complete')
+        ckpt_time.append(time.time())
+        ckpt_tag.append('end_fulliso')
+        logging.info(f'Apply_oe checkpoint: {len(ckpt_time)-1} ({ckpt_tag[-1]}), sub time elapsed: {ckpt_time[-1]-ckpt_time[-2]:.4f} s, total time elapsed: {ckpt_time[-1]-ckpt_time[0]:.4f} s')
 
         # clean up unneeded storage
         if args.emulator_base is None:
@@ -358,9 +408,13 @@ def main(rawargs=None):
                 logging.info(cmd)
                 os.system(cmd)
 
-    if not exists(paths.rfl_working_path) or not exists(paths.uncert_working_path):
+                
+    if not args.flag_skip_inference and (not exists(paths.rfl_working_path) or not exists(paths.uncert_working_path)):
         # Empirical line
-        logging.info('Empirical line inference')
+        logging.info('Apply_oe info: Beginning empirical line inference')
+        ckpt_time.append(time.time())
+        ckpt_tag.append('start_empline')
+        logging.info(f'Apply_oe checkpoint: {len(ckpt_time)-1} ({ckpt_tag[-1]}), sub time elapsed: {ckpt_time[-1]-ckpt_time[-2]:.4f} s, total time elapsed: {ckpt_time[-1]-ckpt_time[0]:.4f} s')
         # Determine the number of neighbors to use.  Provides backwards stability and works
         # well with defaults, but is arbitrary
         nneighbors = int(round(3950 / 9 - 35/36 * args.segmentation_size))
@@ -375,8 +429,24 @@ def main(rawargs=None):
                        output_uncertainty_file=paths.uncert_working_path,
                        isofit_config=paths.modtran_config_path,
                        nneighbors=nneighbors)
+        logging.info('Apply_oe info: Finished empirical line inference')
+        ckpt_time.append(time.time())
+        ckpt_tag.append('end_empline')
+        logging.info(f'Apply_oe checkpoint: {len(ckpt_time)-1}  ({ckpt_tag[-1]}), sub time elapsed: {ckpt_time[-1]-ckpt_time[-2]:.4f} s, total time elapsed: {ckpt_time[-1]-ckpt_time[0]:.4f} s')
 
-    logging.info('Done.')
+    logging.info('Apply_oe info: Apply_oe procedure complete')
+    ckpt_time.append(time.time())
+    ckpt_tag.append('end_all')
+    logging.info(f'Apply_oe checkpoint: {len(ckpt_time)-1} ({ckpt_tag[-1]}), sub time elapsed: {ckpt_time[-1]-ckpt_time[-2]:.4f} s, total time elapsed: {ckpt_time[-1]-ckpt_time[0]:.4f} s')
+    
+    time_tag = time.strftime('%Y%m%dt%H%M%S',time.gmtime(ckpt_time[0]))
+    logging.info(f'Apply_oe info: Writing timing data to applyoe_time_checkpoints_{time_tag}.txt')
+    with open(os.path.join(args.working_directory,'output',f'applyoe_time_checkpoints_{time_tag}.txt'), 'w') as file:
+        file.write(','.join(ckpt_tag))
+        file.write('\n')
+        file.write(','.join("%.18e" % value for value in ckpt_time))
+
+    logging.info(f'********** ENDING APPLY_OE AT {time.asctime(time.gmtime())} UTC **********')
 
 class Pathnames():
     """ Class to determine and hold the large number of relative and absolute paths that are needed for isofit and
@@ -617,10 +687,12 @@ class LUTConfig:
 
         self.aot_550_spacing = 0
         self.aot_550_spacing_min = 0
+        self.aot_550_init = None
 
         # overwrite anything that comes in from the config file
         if lut_config_file is not None:
             for key in lut_config:
+                logging.info(f'LUT config key {key}: {lut_config[key]}')
                 if key in self.__dict__:
                     setattr(self, key, lut_config[key])
 
@@ -781,12 +853,23 @@ def load_climatology(config_path: str, latitude: float, longitude: float, acquis
     if aot_550_lut is not None:
         aerosol_lut_grid['AOT550'] = aot_550_lut.tolist()
         alr = [aerosol_lut_grid['AOT550'][0], aerosol_lut_grid['AOT550'][-1]]
-        aerosol_state_vector['AOT550'] = {
-                        "bounds": [float(alr[0]), float(alr[1])],
-                        "scale": 1,
-                        "init": float((alr[1] - alr[0]) / 10. + alr[0]),
-                        "prior_sigma": 10.0,
-                        "prior_mean": float((alr[1] - alr[0]) / 10. + alr[0])}
+        if lut_params.aot_550_init is None:
+            logging.info('Using standard AOT550 initial value (1/10 of range)')
+            aerosol_state_vector['AOT550'] = {
+                            "bounds": [float(alr[0]), float(alr[1])],
+                            "scale": 1,
+                            "init": float((alr[1] - alr[0]) / 10. + alr[0]),
+                            "prior_sigma": 10.0,
+                            "prior_mean": float((alr[1] - alr[0]) / 10. + alr[0])}
+        else:
+            logging.info('Attempting to use input initial AOT550 value')
+            aerosol_state_vector['AOT550'] = {
+                "bounds": [float(alr[0]), float(alr[1])],
+                "scale": 1,
+                "init": float(lut_params.aot_550_init),
+                "prior_sigma": 10.0,
+                "prior_mean": float(lut_params.aot_550_init)}
+
 
     logging.info('Loading Climatology')
     # If a configuration path has been provided, use it to get relevant info
