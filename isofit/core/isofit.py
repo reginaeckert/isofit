@@ -55,8 +55,11 @@ class Isofit:
         self.logfile = logfile
         logging.basicConfig(format='%(levelname)s:%(message)s', level=self.loglevel, filename=self.logfile)
         
-        logging.info(f'********** BEGINNING LOG FOR RUN ON {time.asctime(time.gmtime())} UTC **********')
-        logging.info(f'Reading from config file at: {config_file}')
+        self.start_time = time.time()
+        self.ckpt_time = []
+        
+        logging.info(f'********** INITIALIZING ISOFIT AT {time.asctime(time.gmtime(self.start_time))} UTC **********')
+        logging.info(f'Isofit info: Reading from config file at: {config_file}')
 
         self.rows = None
         self.cols = None
@@ -80,7 +83,7 @@ class Isofit:
         if self.config.implementation.debug_mode is False:
             ray.init(**rayargs)
         else:
-            logging.info('Debug mode active')
+            logging.info('Isofit info: Debug mode active')
 
         self.workers = None
 
@@ -107,8 +110,11 @@ class Isofit:
 
             If none of the above, the whole cube will be analyzed.
         """
+        ckpt_tag = ['start_all']
+        self.ckpt_time = [time.time()]
+        logging.info(f'********** BEGINNING ISOFIT AT {time.asctime(time.gmtime(self.ckpt_time[0]))} UTC **********')
         
-        logging.info("Building first forward model, will generate any necessary LUTs")
+        logging.info("Isofit info: Building first forward model, will generate any necessary LUTs")
         fm = ForwardModel(self.config)
         io = IO(self.config, fm) # Need the n_rows, n_cols for row_column as well
         if row_column is not None:
@@ -159,8 +165,12 @@ class Isofit:
         start_time = time.time()
         n_tasks = min(n_workers * self.config.implementation.task_inflation_factor, n_iter)
 
-        logging.info(f'Beginning {n_iter} inversions in {n_tasks} chunks using {n_workers} cores')
-
+        logging.info('Isofit info: Done setting up run parameters')
+        self.ckpt_time.append(time.time())
+        ckpt_tag.append('end_env_start_isofit')
+        logging.info(f'Isofit checkpoint: {len(self.ckpt_time)-1} ({ckpt_tag[-1]}), sub time elapsed: {self.ckpt_time[-1]-self.ckpt_time[-2]:.4f} s, total time elapsed: {self.ckpt_time[-1]-self.ckpt_time[0]:.4f} s')
+        logging.info(f'Isofit info: Beginning {n_iter} inversions in {n_tasks} chunks using {n_workers} cores')
+        
         if not self.config.implementation.debug_mode:
             # Divide up spectra to run into chunks
             index_sets = np.linspace(0, n_iter, num=n_tasks, dtype=int)
@@ -176,9 +186,25 @@ class Isofit:
             self.workers.run_set_of_spectra(index_pairs)
 
         total_time = time.time() - start_time
+        logging.info('Isofit info: Completed inversions')
+        self.ckpt_time.append(time.time())
+        ckpt_tag.append('end_isofit')
+        logging.info(f'Isofit checkpoint: {len(self.ckpt_time)-1} ({ckpt_tag[-1]}), sub time elapsed: {self.ckpt_time[-1]-self.ckpt_time[-2]:.4f} s, total time elapsed: {self.ckpt_time[-1]-self.ckpt_time[0]:.4f} s')
 
-        logging.info(f'Inversions complete.  {round(total_time,2)}s total, {round(n_iter/total_time,4)} spectra/s, '
-                     f'{round(n_iter/total_time/n_workers,4)} spectra/s/core')
+        logging.info(f'Isofit info: Inversions complete.  {round(total_time,2)}s total, {round(n_iter/total_time,4)} spectra/s, {round(n_iter/total_time/n_workers,4)} spectra/s/core')
+        
+        #Write final output times
+        time_tag = time.strftime('%Y%m%dt%H%M%S',time.gmtime(self.start_time))
+        logging.info(f'Isofit info: Writing timing data to isofit_time_checkpoints_{time_tag}.txt')
+        output_paths = self.config.output.get_output_files()[0]
+        output_path = os.path.dirname(output_paths[0]) # Take the output path of the first output file
+        #output_path = os.path.commonpath(output_paths) # Could also find the common path
+
+        with open(os.path.join(output_path,f'isofit_time_checkpoints_{time_tag}.txt'), 'w') as file:
+            file.write(','.join(ckpt_tag))
+            file.write('\n')
+            file.write(','.join("%.18e" % value for value in self.ckpt_time))
+        logging.info(f'********** ENDING ISOFIT AT {time.asctime(time.gmtime())} UTC **********')
 
 
 class Worker(object):
