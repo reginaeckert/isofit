@@ -49,17 +49,19 @@ class Isofit:
         # Explicitly set the number of threads to be 1, so we more effectively
         # run in parallel
         os.environ["MKL_NUM_THREADS"] = "1"
-
         # Set logging level
         self.loglevel = level
         self.logfile = logfile
-        logging.basicConfig(format='%(levelname)s:%(message)s', level=self.loglevel, filename=self.logfile)
+
+        logging.basicConfig(format='%(levelname)s:%(asctime)s ||| %(message)s', level=self.loglevel,
+                            filename=self.logfile, datefmt='%Y-%m-%d,%H:%M:%S')
         
         self.start_time = time.time()
         self.ckpt_time = []
         
         logging.info(f'********** INITIALIZING ISOFIT AT {time.asctime(time.gmtime(self.start_time))} UTC **********')
         logging.info(f'Isofit info: Reading from config file at: {config_file}')
+
 
         self.rows = None
         self.cols = None
@@ -72,10 +74,11 @@ class Isofit:
         # Initialize ray for parallel execution
         rayargs = {'address': self.config.implementation.ip_head,
                    '_redis_password': self.config.implementation.redis_password,
-                   'ignore_reinit_error': self.config.implementation.ray_ignore_reinit_error,
                    '_temp_dir': self.config.implementation.ray_temp_dir,
-                    'local_mode': self.config.implementation.n_cores == 1}
-
+                   'ignore_reinit_error': self.config.implementation.ray_ignore_reinit_error,
+                   'include_dashboard': self.config.implementation.ray_include_dashboard,
+                   'local_mode': self.config.implementation.n_cores == 1}
+        
         # We can only set the num_cpus if running on a single-node
         if self.config.implementation.ip_head is None and self.config.implementation.redis_password is None:
             rayargs['num_cpus'] = self.config.implementation.n_cores
@@ -88,9 +91,12 @@ class Isofit:
         self.workers = None
 
     def __del__(self):
-        ray.shutdown()
+        try:
+            ray.shutdown()
+        except:
+            return
 
-    def run(self, row_column = None):
+    def run(self, row_column=None):
         """
         Iterate over spectra, reading and writing through the IO
         object to handle formatting, buffering, and deferred write-to-file.
@@ -157,7 +163,8 @@ class Isofit:
 
         if self.workers is None and not self.config.implementation.debug_mode:
             remote_worker = ray.remote(Worker)
-            self.workers = ray.util.ActorPool([remote_worker.remote(self.config, fm_id, self.loglevel, self.logfile, n, n_workers)
+            self.workers = ray.util.ActorPool([remote_worker.remote(self.config, fm_id, self.loglevel, self.logfile, n,
+                                                                    n_workers)
                                                for n in range(n_workers)])
         elif self.config.implementation.debug_mode:
             self.workers = Worker(self.config, fm, self.loglevel, self.logfile, 0, 1)
@@ -180,8 +187,7 @@ class Isofit:
                 indices_to_run = [index_pairs[index_sets[l]:index_sets[l + 1], :]
                                   for l in range(len(index_sets) - 1)]
 
-            res = list(self.workers.map_unordered(lambda a, b: a.run_set_of_spectra.remote(b),
-                                              indices_to_run))
+            res = list(self.workers.map_unordered(lambda a, b: a.run_set_of_spectra.remote(b), indices_to_run))
         else:
             self.workers.run_set_of_spectra(index_pairs)
 
@@ -208,7 +214,8 @@ class Isofit:
 
 
 class Worker(object):
-    def __init__(self, config: configs.Config, forward_model: ForwardModel, loglevel: str, logfile: str, worker_id: int = None, total_workers: int = None):
+    def __init__(self, config: configs.Config, forward_model: ForwardModel, loglevel: str, logfile: str,
+                 worker_id: int = None, total_workers: int = None):
         """
         Worker class to help run a subset of spectra.
 
@@ -220,10 +227,11 @@ class Worker(object):
             total_workers: the total number of workers running, for logging reference
         """
 
-        logging.basicConfig(format='%(levelname)s:%(message)s', level=loglevel, filename=logfile)
+        logging.basicConfig(format='%(levelname)s:%(asctime)s ||| %(message)s', level=loglevel, filename=logfile,
+                            datefmt='%Y-%m-%d,%H:%M:%S')
         self.config = config
         self.fm = forward_model
-        #self.fm = ForwardModel(self.config)
+        # self.fm = ForwardModel(self.config)
 
         if self.config.implementation.mode == 'mcmc_inversion':
             self.iv = MCMCInversion(self.config, self.fm)
@@ -241,9 +249,7 @@ class Worker(object):
         self.worker_id = worker_id
         self.completed_spectra = 0
 
-
     def run_set_of_spectra(self, indices: np.array):
-
 
         for index in range(0, indices.shape[0]):
 
@@ -277,7 +283,8 @@ class Worker(object):
                 if index % 100 == 0:
                     if self.worker_id is not None and self.approximate_total_spectra is not None:
                         percent = np.round(self.completed_spectra / self.approximate_total_spectra * 100,2)
-                        logging.info(f'Worker {self.worker_id} completed {self.completed_spectra}/~{self.approximate_total_spectra}:: {percent}% complete')
+                        logging.info(f'Worker {self.worker_id} completed {self.completed_spectra}/'
+                                     f'~{self.approximate_total_spectra}:: {percent}% complete')
                     else:
                         logging.info(f'Worker at start location ({row},{col}) completed {index}/{indices.shape[0]}')
 
