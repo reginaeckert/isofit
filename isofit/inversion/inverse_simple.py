@@ -140,7 +140,7 @@ def invert_algebraic(surface, RT: RadiativeTransfer, instrument, x_surface,
     return rfl_est, Ls, coeffs
 
 
-def invert_simple(forward, meas, geom):
+def invert_simple(forward, meas, geom,fm_init=None):
     """Find an initial guess at the state vector. This currently uses
     traditional (non-iterative, heuristic) atmospheric correction."""
 
@@ -161,9 +161,12 @@ def invert_simple(forward, meas, geom):
         h20_fixed = True
     # A slightly faster, but less readable, version of this list comparison is:
     # bool(set(['H2OSTR', 'h2o']) & set(geom.fixed_state[0]))
-                                            
-    x = forward.init.copy()
     
+    if fm_init is None:
+        x = forward.init.copy()
+    else:
+        x = fm_init
+        
     # First step is to get the atmosphere. 
     # First we check if we have fixed the state of atmospheric water vapor
     ### Since heuristic_atmosphere() only searches the LUT grid for 

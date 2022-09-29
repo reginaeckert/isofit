@@ -292,14 +292,16 @@ class Inversion:
             self.least_squares_params['x_scale'] = self.fm.scale[self.inds_free]
         
         # Update the initialization to the statevector
+        fm_init = self.fm.init.copy() 
+        #Better solution is updating init to fixed_state in ForwardModel - need to implement
         if geom.fixed_state is not None:
             matched_idx = np.array([self.fm.statevec.index(fs) for fs in geom.fixed_state[0]])
-            self.fm.init[matched_idx] = geom.fixed_state[1]
+            fm_init[matched_idx] = geom.fixed_state[1]
 
         # Simulations are easy - return the initial state vector
         if self.mode == 'simulation':
             self.fm.surface.rfl = meas
-            return np.array([self.fm.init.copy()])
+            return np.array([self.fm.init.copy()]) #Unclear if we want to update this with fixed_state
 
         if len(self.integration_grid.values()) == 0:
             combo_values = [None]
@@ -319,7 +321,7 @@ class Inversion:
                     self.x_fixed[self.inds_geom_fixed] = geom.fixed_state[1]
 
             # Calculate the initial solution, if needed.
-            x0 = invert_simple(self.fm, meas, geom)
+            x0 = invert_simple(self.fm, meas, geom, fm_init=fm_init)
             x0 = x0[self.inds_free]
 
             # Catch any state vector elements outside of bounds
@@ -340,6 +342,16 @@ class Inversion:
             # is not blank)
             if len(self.inds_preseed) > 0:
                 x0[self.inds_preseed] = combo
+                # try:
+                #     x0[self.inds_preseed] = combo
+                # except IndexError:
+                #     pass 
+                #     #***Room for improvement!!! Potential error here
+                #     #Where inds_preseed are outside x0, do nothing
+                #     #This *should* only happen when we have fixed state inds that are not actually part of x0 anymore
+                #     #Could do a complicated check of inds_preseed and inds_fixed instead, but this should do the job
+                #     #This will fail in the case where we have some inds_preseed that are not part of fixed_state
+                    
 
             # Record initializaation state
             geom.x_surf_init = x[self.fm.idx_surface]
