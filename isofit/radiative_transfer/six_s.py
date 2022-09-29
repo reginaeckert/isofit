@@ -135,7 +135,7 @@ class SixSRT(TabularRT):
             return config.engine_base_dir
 
         try:
-            logging.info(f'OS environment: {os.getenv('SIXS_DIR')}')
+            logging.info('OS environment: {}'.format(os.getenv('SIXS_DIR')))
             return os.getenv('SIXS_DIR')
         except KeyError:
             logging.error('I could not find the SIXS base directory')
