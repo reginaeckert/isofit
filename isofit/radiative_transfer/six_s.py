@@ -131,9 +131,11 @@ class SixSRT(TabularRT):
         """Seek out a sixs base directory."""
 
         if config.engine_base_dir is not None:
+            logging.info(f'Config: {config.engine_base_dir}')
             return config.engine_base_dir
 
         try:
+            logging.info(f'OS environment: {os.getenv('SIXS_DIR')}')
             return os.getenv('SIXS_DIR')
         except KeyError:
             logging.error('I could not find the SIXS base directory')
