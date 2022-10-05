@@ -1,0 +1,18 @@
+
+#Basic pixel-by-pixel call structure - apply_oe
+apply_oe.py input_radiance_file input_loc_file input_obs_file save_base_dir sensor_code --presolve=1 --empirical_line=0 --surface_path=surface_file --emulator_base=emulator_file --n_cores=40 --log_file=log_file --wavelength_path=wavelength_path --lut_config_file=lut_config_file (--multiple_restarts)
+
+#Basic pixel-by-pixel call structure - with atmospheric params fixed to ground truth (simulation only)
+run_isofit_fixed.py input_radiance_file input_loc_file input_obs_file save_base_dir sensor_code input_state --presolve=1 --empirical_line=0 --surface_path=surface_file --emulator_base=emulator_file --n_cores=40 --log_file=log_file --wavelength_path=wavelength_path --lut_config_file=lut_config_file (--multiple_restarts)
+
+#Basic SCOE call structure - SCOE
+SC_OE.py input_radiance_file input_loc_file input_obs_file save_base_dir sensor_code --presolve=1 --surface_path=surface_file --emulator_base=emulator_file --n_cores=40 --log_file=log_file --segmentation_size=40 --err_matrix=noerr --gpr_uncert=-1 --wavelength_path=wavelength_path --lut_config_file=lut_config_file (--multiple_restarts --flag_run_part1_only --flag_skip_inference)
+
+#Basic emprical line call structure - apply_oe (also produced as part of SCOE processing, unless --flag_skip_inference is used)
+apply_oe.py input_radiance_file input_loc_file input_obs_file save_base_dir sensor_code --presolve=1 --empirical_line=1 --surface_path=surface_file --emulator_base=emulator_file --n_cores=40 --log_file=log_file --segmentation_size=40 --wavelength_path=wavelength_path --lut_config_file=lut_config_file (--multiple_restarts)
+
+#Run forward simulation with srun
+python simulate_data.py --water india --output_base simplain --config_file simulation_ang20210710t100946_plain_config.json --aod_offset 0.2 --noise_factor 1 --flag_instrument_noise
+
+#Run GPR on random points drawn from classic retrieval
+python run_gpr_from_classic.py

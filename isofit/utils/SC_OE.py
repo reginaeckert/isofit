@@ -1,7 +1,7 @@
 # This is the main program to run our prototype from beginning to the end
 # Steffen Mauceri, 07/21
 # Edited by Phil Brodrick Fall 2021
-# Edited by Regina Eckert, October 2022, reckert
+# Edited by Regina Eckert, October 2022, reckert@jpl.nasa.gov
 
 import numpy as np
 from matplotlib import pyplot as plt
