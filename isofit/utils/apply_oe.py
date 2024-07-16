@@ -376,7 +376,8 @@ def apply_oe(args):
 
     if lut_params.flag_ocean_elevation:
         elevation_lut_grid = None
-        mean_elevation_km = 0.0
+        mean_elevation_km = 0.0001 #KF emulators min value
+        #mean_elevation_km = 0.0
 
     if args.emulator_base is not None:
         if elevation_lut_grid is not None and np.any(elevation_lut_grid < 0):
