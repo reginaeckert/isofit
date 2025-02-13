@@ -20,7 +20,6 @@
 
 import json
 import os
-from argparse import ArgumentError
 from collections import OrderedDict
 from os.path import expandvars
 from typing import List
@@ -38,6 +37,9 @@ eps = 1e-5
 
 ### Classes ###
 
+# Global variable makes it non-shared mem in ray
+Cache = {"stats": {}}
+
 
 class VectorInterpolator:
     """Linear look up table interpolator.  Support linear interpolation through radial space by expanding the look
@@ -47,7 +49,6 @@ class VectorInterpolator:
         grid_input: list of lists of floats, indicating the gridpoint elements in each grid dimension
         data_input: n dimensional array of radiative transfer engine outputs (each dimension size corresponds to the
                     given grid_input list length, with the last dimensions equal to the number of sensor channels)
-        lut_interp_types: a list indicating if each dimension is in radiance (r), degrees (r), or normal (n) units.
         version: version to use: 'rg' for scipy RegularGridInterpolator, 'mlg' for multilinear grid interpolator
     """
 
@@ -55,8 +56,7 @@ class VectorInterpolator:
         self,
         grid_input: List[List[float]],
         data_input: np.array,
-        lut_interp_types: List[str],
-        version="nds-1",
+        version="mlg",
     ):
         # Determine if this a singular unique value, if so just return that directly
         val = data_input[(0,) * data_input.ndim]
@@ -65,7 +65,6 @@ class VectorInterpolator:
             self.value = val
             return
 
-        self.lut_interp_types = lut_interp_types
         self.single_point_data = None
 
         # Lists and arrays are mutable, so copy first
@@ -75,71 +74,6 @@ class VectorInterpolator:
         # Check if we are using a single grid point. If so, store the grid input.
         if np.prod(list(map(len, grid))) == 1:
             self.single_point_data = data
-
-        # expand grid dimensionality as needed
-        [radian_locations] = np.where(self.lut_interp_types == "r")
-        [degree_locations] = np.where(self.lut_interp_types == "d")
-        angle_locations = np.hstack([radian_locations, degree_locations])
-        angle_types = np.hstack(
-            [
-                self.lut_interp_types[radian_locations],
-                self.lut_interp_types[degree_locations],
-            ]
-        )
-        for _angle_loc in range(len(angle_locations)):
-            angle_loc = angle_locations[_angle_loc]
-
-            # get original grid at given location
-            original_grid_subset = np.array(grid[angle_loc])
-
-            # convert for angular coordinates
-            if angle_types[_angle_loc] == "r":
-                grid_subset_cosin = np.cos(original_grid_subset)
-                grid_subset_sin = np.sin(original_grid_subset)
-
-            elif angle_types[_angle_loc] == "d":
-                grid_subset_cosin = np.cos(np.deg2rad(original_grid_subset))
-                grid_subset_sin = np.sin(np.deg2rad(original_grid_subset))
-
-            # handle the fact that the grid may no longer be in order
-            grid_subset_cosin_order = np.argsort(grid_subset_cosin)
-            grid_subset_sin_order = np.argsort(grid_subset_sin)
-
-            # convert current grid location, and add a second
-            grid[angle_loc] = grid_subset_cosin[grid_subset_cosin_order].tolist()
-            grid.insert(angle_loc + 1, grid_subset_sin[grid_subset_sin_order].tolist())
-
-            # now copy the data to be interpolated through the extra dimension,
-            # at the specific angle_loc axes.  We'll use broadcast_to to do
-            # this, but we need to do it on the last dimension.  So start by
-            # temporarily moving the target axes there, then broadcasting
-            data = np.array(data)
-            data = np.swapaxes(data, -1, angle_loc)
-            data_dim = list(np.shape(data))
-            data_dim.append(data_dim[-1])
-            data = data[..., np.newaxis] * np.ones(data_dim)
-
-            # Now we need to actually copy the data between the first two axes,
-            # as broadcast_to doesn't do this
-            for ind in range(data.shape[-1]):
-                data[..., ind] = data[..., :, ind]
-
-            # Now re-order the cosin dimension
-            data = data[..., grid_subset_cosin_order, :]
-            # Now re-order the sin dimension
-            data = data[..., grid_subset_sin_order]
-
-            # now re-arrange the axes so they're in the right order again,
-            dst_axes = np.arange(len(data.shape) - 2).tolist()
-            dst_axes.insert(angle_loc, len(data.shape) - 2)
-            dst_axes.insert(angle_loc + 1, len(data.shape) - 1)
-            dst_axes.remove(angle_loc)
-            dst_axes.append(angle_loc)
-            data = np.ascontiguousarray(np.transpose(data, axes=dst_axes))
-
-            # update the rest of the angle locations
-            angle_locations += 1
-
         self.n = data.shape[-1]
 
         # RegularGrid
@@ -154,6 +88,9 @@ class VectorInterpolator:
         elif version == "mlg":
             self.method = 2
 
+            # None to disable, 0 for unlimited, negatives == 1
+            self.cache_size = 1
+
             self.gridtuples = [np.array(t) for t in grid]
             self.gridarrays = data
             self.binwidth = [
@@ -162,30 +99,19 @@ class VectorInterpolator:
             self.maxbaseinds = np.array([len(t) - 1 for t in self.gridtuples])
 
         else:
-            raise ArgumentError(None, f"Unknown interpolator version: {version!r}")
+            raise AttributeError(f"Unknown interpolator version: {version!r}")
 
     def _interpolate(self, points):
         """
-        Supports styles 'rg' and 'nds-k'
+        Supports style 'rg'
         """
         # If we only have one point, we can't do any interpolation, so just
         # return the original data.
         if self.single_point_data is not None:
             return self.single_point_data
 
-        x = np.zeros((self.n, len(points) + 1 + np.sum(self.lut_interp_types != "n")))
-        offset_count = 0
-        for i in range(len(points)):
-            if self.lut_interp_types[i] == "n":
-                x[:, i + offset_count] = points[i]
-            elif self.lut_interp_types[i] == "r":
-                x[:, i + offset_count] = np.cos(points[i])
-                x[:, i + 1 + offset_count] = np.sin(points[i])
-                offset_count += 1
-            elif self.lut_interp_types[i] == "d":
-                x[:, i + offset_count] = np.cos(np.deg2rad(points[i]))
-                x[:, i + 1 + offset_count] = np.sin(np.deg2rad(points[i]))
-                offset_count += 1
+        x = np.zeros((self.n, len(points) + 1))
+        x[:, :-1] = points
 
         # This last dimension is always an integer so no
         # interpolation is performed. This is done only
@@ -195,65 +121,66 @@ class VectorInterpolator:
 
         return res
 
+    def _lookup(self, i, point):
+        """
+        Calculates the slicing for the cube in _multilinear_grid
+        """
+        j = np.searchsorted(self.gridtuples[i][:-1], point) - 1
+
+        # Bounds functions
+        lower = lambda: max(min(self.maxbaseinds[i], j), 0)
+        upper = lambda: max(min(self.maxbaseinds[i] + 2, j + 2), 2)
+
+        if point >= self.gridtuples[i][-1]:
+            return None, upper() - 1
+        elif point <= self.gridtuples[i][0]:
+            return None, lower()
+        else:
+            delta = (point - self.gridtuples[i][j]) / self.binwidth[i][j]
+            return delta, slice(lower(), upper())
+
     def _multilinear_grid(self, points):
         """
-        Jouni's implementation
+        Cached version of Jouni's implementation
 
         Args:
-            point: The point being interpolated. If at the limit, the extremal value in
+            points: The point being interpolated. If at the limit, the extremal value in
                     the grid is returned.
 
         Returns:
             cube: np.ndarray
         """
-        x = np.zeros((len(points) + np.sum(self.lut_interp_types != "n")))
-        offset_count = 0
-        for i in range(len(points)):
-            if self.lut_interp_types[i] == "n":
-                x[i + offset_count] = points[i]
-            elif self.lut_interp_types[i] == "r":
-                x[i + offset_count] = np.cos(points[i])
-                x[i + 1 + offset_count] = np.sin(points[i])
-                offset_count += 1
-            elif self.lut_interp_types[i] == "d":
-                x[i + offset_count] = np.cos(np.deg2rad(points[i]))
-                x[i + 1 + offset_count] = np.sin(np.deg2rad(points[i]))
-                offset_count += 1
+        deltas = [None] * points.size
+        idxs = [None] * points.size
 
-        # Index of left side of bin, and don't go over (that's why it's t[:-1] instead of t)
-        inds = [
-            np.searchsorted(t[:-1], x[i]) - 1 for i, t in enumerate(self.gridtuples)
-        ]
-        deltas = np.array(
-            [
-                (x[i] - self.gridtuples[i][j]) / self.binwidth[i][j]
-                for i, j in enumerate(inds)
-            ]
-        )
-        diff = 1 - deltas
+        for i, point in enumerate(points):
+            if self.cache_size is not None:
+                cache = Cache.setdefault(i, {})
+                stats = Cache["stats"].setdefault(i, {"hit": 0, "miss": 0})
 
-        # Set the 'cube' data to be our interpolation data
-        idx = tuple(
-            [
-                slice(
-                    max(min(self.maxbaseinds[j], i), 0),
-                    max(min(self.maxbaseinds[j] + 2, i + 2), 2),
-                )
-                for j, i in enumerate(inds)
-            ]
-        )
-        cube = np.copy(self.gridarrays[idx], order="A")
+                if point in cache:
+                    data = cache[point]
+                    stats["hit"] += 1
+                else:
+                    # Simple FIFO
+                    if self.cache_size and len(cache) >= self.cache_size:
+                        cache.pop(list(cache)[0])
 
-        for i, di in enumerate(deltas):
-            # Eliminate those indexes where we are outside grid range or exactly on the grid point
-            if x[i] >= self.gridtuples[i][-1]:
-                cube = cube[1]
-            elif x[i] <= self.gridtuples[i][0]:
-                cube = cube[0]
-            # Otherwise eliminate index by linear interpolation
+                    data = self._lookup(i, point)
+                    cache[point] = data
+                    stats["miss"] += 1
             else:
-                cube[0] *= diff[i]
-                cube[1] *= di
+                data = self._lookup(i, point)
+
+            deltas[i], idxs[i] = data
+
+        cube = np.copy(self.gridarrays[tuple(idxs)], order="A")
+
+        # Only linear interpolate sliced dimensions
+        for i, idx in enumerate(idxs):
+            if isinstance(idx, slice):
+                cube[0] *= 1 - deltas[i]
+                cube[1] *= deltas[i]
                 cube[0] += cube[1]
                 cube = cube[0]
 
@@ -624,37 +551,39 @@ def resample_spectrum(
         np.array: interpolated radiance vector
 
     """
-    # check if x is vector or matrix
-    if len(x.shape) > 1:
-        x_raw = x.copy()
-        x_raw = x_raw.transpose()
-    else:
-        x_raw = x.copy()
-        x_raw = x_raw.reshape((len(x), 1))
-
     H = np.array(
         [
             spectral_response_function(wl, wi, fwhmi / 2.355)
             for wi, fwhmi in zip(wl2, fwhm2)
         ]
     )
+    H[np.isnan(H)] = 0
 
-    # replace any NaNs in the LUT before resampling
-    x_raw[np.isnan(x_raw)] = 0.0
+    dims = len(x.shape)
+    if fill:
+        if dims > 1:
+            raise Exception("resample_spectrum(fill=True) only works with vectors")
 
-    if fill is False:
-        if len(x.shape) > 1:
-            return np.dot(H, x_raw).transpose()
-        else:
-            return np.dot(H, x_raw).ravel()
-    else:
-        xnew = np.dot(H, x_raw).ravel()
+        x = x.reshape(-1, 1)
+        xnew = np.dot(H, x).ravel()
         good = np.isfinite(xnew)
         for i, xi in enumerate(xnew):
             if not good[i]:
                 nearest_good_ind = np.argmin(abs(wl2[good] - wl2[i]))
                 xnew[i] = xnew[nearest_good_ind]
         return xnew
+    else:
+        # Replace NaNs with zeros
+        x[np.isnan(x)] = 0
+
+        # Matrix
+        if dims > 1:
+            return np.dot(H, x.T).T
+
+        # Vector
+        else:
+            x = x.reshape(-1, 1)
+            return np.dot(H, x).ravel()
 
 
 def load_spectrum(spectrum_file: str) -> (np.array, np.array):

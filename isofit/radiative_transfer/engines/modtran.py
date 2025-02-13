@@ -24,17 +24,16 @@ import logging
 import os
 import re
 import subprocess
+import time
 from copy import deepcopy
 from sys import platform
 
-import time
 import numpy as np
 import scipy.interpolate
 import scipy.stats
 
+from isofit.core.common import json_load_ascii, recursive_replace
 from isofit.radiative_transfer.radiative_transfer_engine import RadiativeTransferEngine
-
-from ..core.common import json_load_ascii, recursive_replace
 
 Logger = logging.getLogger(__file__)
 
@@ -44,13 +43,6 @@ eps = 1e-5  # used for finite difference derivative calculations
 tropopause_altitude_km = 17.0
 
 ### Classes ###
-
-
-class FileExistsError(Exception):
-    """FileExistsError with a message."""
-
-    def __init__(self, message):
-        super(FileExistsError, self).__init__(message)
 
 
 class ModtranRT(RadiativeTransferEngine):
@@ -293,6 +285,7 @@ class ModtranRT(RadiativeTransferEngine):
                     pass
                 n_rerun += 1
 
+        solzen = self.load_tp6(f"{file}.tp6")
         coszen = np.cos(solzen * np.pi / 180.0)
         params = self.load_chn(f"{file}.chn", coszen)
 
@@ -335,53 +328,22 @@ class ModtranRT(RadiativeTransferEngine):
         vals["DISALB"] = True
         vals["NAME"] = filename_base
         vals["FILTNM"] = os.path.normpath(self.filtpath)
+
+        # Translate to the MODTRAN OBSZEN convention, assumes we are downlooking
+        if vals["OBSZEN"] < 90:
+            vals["OBSZEN"] = 180 - abs(vals["OBSZEN"])
+
         modtran_config_str, modtran_config = self.modtran_driver(dict(vals))
 
         # Check rebuild conditions: LUT is missing or from a different config
         infilename = "LUT_" + filename_base + ".json"
         infilepath = os.path.join(self.sim_path, "LUT_" + filename_base + ".json")
 
-        if not self.required_results_exist(filename_base):
-            rebuild = True
-        else:
-            # We compare the two configuration files, ignoring names and
-            # wavelength paths which tend to be non-portable
-            with open(infilepath, "r") as fin:
-                current_config = json.load(fin)["MODTRAN"]
-                current_config[0]["MODTRANINPUT"]["NAME"] = ""
-                modtran_config[0]["MODTRANINPUT"]["NAME"] = ""
-                current_config[0]["MODTRANINPUT"]["SPECTRAL"]["FILTNM"] = ""
-                modtran_config[0]["MODTRANINPUT"]["SPECTRAL"]["FILTNM"] = ""
-                if self.multipart_transmittance:
-                    current_config[1]["MODTRANINPUT"]["NAME"] = ""
-                    modtran_config[1]["MODTRANINPUT"]["NAME"] = ""
-                    current_config[1]["MODTRANINPUT"]["SPECTRAL"]["FILTNM"] = ""
-                    modtran_config[1]["MODTRANINPUT"]["SPECTRAL"]["FILTNM"] = ""
-                    current_config[2]["MODTRANINPUT"]["NAME"] = ""
-                    modtran_config[2]["MODTRANINPUT"]["NAME"] = ""
-                    current_config[2]["MODTRANINPUT"]["SPECTRAL"]["FILTNM"] = ""
-                    modtran_config[2]["MODTRANINPUT"]["SPECTRAL"]["FILTNM"] = ""
-                    #Hacky fix to decimel places not matching
-                    modtran_config[0]["MODTRANINPUT"]["AEROSOLS"]["IREGSPC"][0]["EXTC"] = ""
-                    modtran_config[0]["MODTRANINPUT"]["AEROSOLS"]["IREGSPC"][0]["ABSC"] = ""
-                    modtran_config[1]["MODTRANINPUT"]["AEROSOLS"]["IREGSPC"][0]["EXTC"] = ""
-                    modtran_config[1]["MODTRANINPUT"]["AEROSOLS"]["IREGSPC"][0]["ABSC"] = ""
-                    modtran_config[2]["MODTRANINPUT"]["AEROSOLS"]["IREGSPC"][0]["EXTC"] = ""
-                    modtran_config[2]["MODTRANINPUT"]["AEROSOLS"]["IREGSPC"][0]["ABSC"] = "" 
-                    current_config[0]["MODTRANINPUT"]["AEROSOLS"]["IREGSPC"][0]["EXTC"] = ""
-                    current_config[0]["MODTRANINPUT"]["AEROSOLS"]["IREGSPC"][0]["ABSC"] = ""
-                    current_config[1]["MODTRANINPUT"]["AEROSOLS"]["IREGSPC"][0]["EXTC"] = ""
-                    current_config[1]["MODTRANINPUT"]["AEROSOLS"]["IREGSPC"][0]["ABSC"] = ""
-                    current_config[2]["MODTRANINPUT"]["AEROSOLS"]["IREGSPC"][0]["EXTC"] = ""
-                    current_config[2]["MODTRANINPUT"]["AEROSOLS"]["IREGSPC"][0]["ABSC"] = ""
-                current_str = json.dumps(current_config)
-                modtran_str = json.dumps(modtran_config)
-                rebuild = modtran_str.strip() != current_str.strip()
+        if self.required_results_exist(filename_base):
+            Logger.warning(f"File already exists, skipping execution: {filename_base}")
+            return
 
-        if not rebuild:
-            Logger.warning(
-                f"File already exists and not set to rebuild, skipping execution: {filename_base}"
-            )
+        if self.engine_config.rte_configure_and_exit:
             return
 
         # write_config_file
@@ -592,7 +554,6 @@ class ModtranRT(RadiativeTransferEngine):
                         param[0]["MODTRANINPUT"]["ATMOSPHERE"]["NPROF"] = nprof + 1
 
             # Surface parameters we want to populate even if unassigned
-
             elif key in ["surface_elevation_km", "GNDALT"]:
                 param[0]["MODTRANINPUT"]["SURFACE"]["GNDALT"] = val
 
@@ -635,9 +596,8 @@ class ModtranRT(RadiativeTransferEngine):
             lvl0["NARSPC"] = len(self.aer_wl)
             lvl0["VARSPC"] = [float(v) for v in self.aer_wl]
             lvl0["ASYM"] = [float(v) for v in total_asym]
-            lvl0["EXTC"] = [float(v) / total_extc550 for v in total_extc] 
+            lvl0["EXTC"] = [float(v) / total_extc550 for v in total_extc]
             lvl0["ABSC"] = [float(v) / total_extc550 for v in total_absc]
-            #***Need to round this to a specific number of decimels when writing to make sure subsequent re-runs are exactly the same
 
         if self.multipart_transmittance:
             const_rfl = np.array(np.array(self.test_rfls) * 100, dtype=int)
@@ -686,7 +646,6 @@ class ModtranRT(RadiativeTransferEngine):
                     break
 
         return max_water
-
 
     def required_results_exist(self, filename_base):
         infilename = os.path.join(self.sim_path, "LUT_" + filename_base + ".json")

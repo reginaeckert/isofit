@@ -24,10 +24,6 @@ from datetime import datetime
 
 import numpy as np
 
-import isofit
-
-from .sunposition import sunpos
-
 
 class Geometry:
     """The geometry of the observation, all we need to calculate sensor,
@@ -38,6 +34,7 @@ class Geometry:
         obs: np.array = None,
         loc: np.array = None,
         dt: datetime = None,
+        esd: np.array = None,
         bg_rfl=None,
     ):
         # Set some benign defaults...
@@ -54,19 +51,13 @@ class Geometry:
         self.earth_sun_distance = None
         self.esd_factor = None
 
-        self.earth_sun_file = None
-        self.earth_sun_distance_path = os.path.join(
-            isofit.root, "data", "earth_sun_distance.txt"
-        )
-        try:
-            self.earth_sun_distance_reference = np.loadtxt(self.earth_sun_distance_path)
-        except FileNotFoundError:
+        if esd is None:
             logging.warning(
-                "Earth-sun-distance file not found on system. "
-                "Proceeding without might cause some inaccuracies down the line."
+                "Earth sun distance not provided. Proceeding without might cause some inaccuracies down the line"
             )
-            self.earth_sun_distance_reference = np.ones((366, 2))
-            self.earth_sun_distance_reference[:, 0] = np.arange(1, 367, 1)
+            esd = np.ones((366, 2))
+            esd[:, 0] = np.arange(1, 367, 1)
+        self.earth_sun_distance_reference = esd
 
         self.bg_rfl = bg_rfl
         self.cos_i = None
@@ -77,16 +68,13 @@ class Geometry:
         if obs is not None:
             self.path_length_km = obs[0] / 1000
             self.observer_azimuth = obs[1]  # 0 to 360 clockwise from N
-            self.observer_zenith = 180 - obs[2]  # 0 to 90 from zenith #MODTRAN convention
+            self.observer_zenith = obs[2]  # 0 to 90 from zenith
             self.solar_azimuth = obs[3]  # 0 to 360 clockwise from N
             self.solar_zenith = obs[4]  # 0 to 90 from zenith
-            # self.OBSZEN = 180.0 - abs(self.observer_zenith)  # MODTRAN convention?
-            # self.TRUEAZ = self.observer_azimuth  # MODTRAN convention?
             self.cos_i = obs[8]  # cosine of eSZA
             # calculate relative to-sun azimuth
             delta_phi = np.abs(self.solar_azimuth - self.observer_azimuth)
-            self.relative_azimuth = np.minimum(delta_phi, 360 - delta_phi)
-            # self.RELAZ = np.minimum(delta_phi, 360 - delta_phi)
+            self.relative_azimuth = np.minimum(delta_phi, 360 - delta_phi)  # 0 to 180
 
         # The 'loc' object is a list-like object that optionally contains
         # latitude and longitude information about the surface being

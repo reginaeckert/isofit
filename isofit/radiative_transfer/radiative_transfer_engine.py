@@ -18,6 +18,7 @@
 # Author: Philip G. Brodrick, philip.brodrick@jpl.nasa.gov
 # Author: Niklas Bohn, urs.n.bohn@jpl.nasa.gov
 #
+from __future__ import annotations
 
 import logging
 import os
@@ -28,13 +29,8 @@ from typing import Callable
 import numpy as np
 import xarray as xr
 
-import isofit
 from isofit import ray
-from isofit.configs.sections.radiative_transfer_config import (
-    RadiativeTransferEngineConfig,
-)
 from isofit.core import common
-from isofit.core.geometry import Geometry
 from isofit.radiative_transfer import luts
 
 Logger = logging.getLogger(__file__)
@@ -58,23 +54,6 @@ class RadiativeTransferEngine:
         "observer_altitude_km",
         "surface_elevation_km",
     ]
-
-    # Informs the VectorInterpolator the units for a given key
-    angular_lut_keys = {
-        # Degrees
-        "observer_azimuth": "d",
-        "observer_zenith": "d",
-        "solar_azimuth": "d",
-        "solar_zenith": "d",
-        "relative_azimuth": "d",
-        # Radians
-        #   "key": "r",
-        # All other keys default to "n" = Not angular
-    }
-
-    earth_sun_distance_path = os.path.join(
-        isofit.root, "data", "earth_sun_distance.txt"
-    )
 
     # These properties enable easy access to the lut data
     coszen = property(lambda self: self["coszen"])
@@ -148,8 +127,7 @@ class RadiativeTransferEngine:
 
         # ToDo: move setting of multipart rfl values to config
         if self.multipart_transmittance:
-            self.test_rfls = [0,0.1,0.5] 
-            #self.test_rfls = [0.1,0.5] 
+            self.test_rfls = [0.1, 0.5]
 
         # Extract from LUT file if available, otherwise initialize it
         if exists:
@@ -159,7 +137,9 @@ class RadiativeTransferEngine:
             )
             self.lut = luts.load(lut_path, subset=engine_config.lut_names)
             self.lut_grid = lut_grid or luts.extractGrid(self.lut)
-            self.points, self.lut_names = luts.extractPoints(self.lut)
+            self.points = luts.extractPoints(self.lut)
+            self.lut_names = list(self.lut_grid.keys())
+            Logger.info(f"LUT grid loaded from file: {self.lut_grid}")
 
             # remove 'point' if added to lut_names after subsetting
             if "point" in self.lut_names:
@@ -176,35 +156,34 @@ class RadiativeTransferEngine:
                     "Unknown RT mode provided in LUT file. Please use either 'transm' or 'rdn'."
                 )
 
-            # if necessary, resample prebuilt LUT to desired instrument spectral response
-            if not len(wl) == len(self.lut.wl) or all(wl == self.lut.wl):
-                Logger.info(f"Resampling LUT to instrument spectral response.")
-                conv = xr.Dataset(
-                    coords={"point": self.lut.point, "wl": wl},
-                    attrs={"RT_mode": self.rt_mode},
+            # If necessary, resample prebuilt LUT to desired instrument spectral response
+            if not len(wl) == len(self.lut.wl) or not all(wl == self.lut.wl):
+                # Discover variables along the wl dim
+                keys = {key for key in self.lut if "wl" in self.lut[key].dims} - {
+                    "fwhm",
+                }
+
+                # Apply resampling to these keys
+                conv = xr.apply_ufunc(
+                    common.resample_spectrum,
+                    self.lut[keys],
+                    kwargs={"wl": self.lut.wl, "wl2": wl, "fwhm2": fwhm},
+                    input_core_dims=[["wl"]],  # Only operate on keys with this dim
+                    exclude_dims=set(["wl"]),  # Allows changing the wl size
+                    output_core_dims=[["wl"]],  # Adds wl to the expected output dims
+                    keep_attrs="override",
+                    # on_missing_core_dim = 'copy' # Newer versions of xarray support this
                 )
-                for quantity in self.lut:
-                    if quantity in luts.Keys.alldim.keys():
-                        conv[quantity] = (
-                            ("point", "wl"),
-                            common.resample_spectrum(
-                                self.lut[quantity].data, self.lut.wl, wl, fwhm
-                            ),
-                        )
-                    if quantity == "solar_irr":
-                        conv[quantity] = (
-                            "wl",
-                            common.resample_spectrum(
-                                self.lut[quantity].data, self.lut.wl, wl, fwhm
-                            ),
-                        )
-                    if quantity == "fwhm":
-                        conv[quantity] = ("wl", fwhm)
-                    if quantity in luts.Keys.consts.keys():
-                        conv[quantity] = self.lut[quantity].data
 
+                # If not on newer versions, add keys not on the wl dim
+                for key in list(self.lut.drop_dims("wl")):
+                    conv[key] = self.lut[key]
+
+                # Override the fwhm
+                conv["fwhm"] = ("wl", fwhm)
+
+                # Exchange the lut with the resampled version
                 self.lut = conv
-
         else:
             Logger.info(f"No LUT store found, beginning initialization and simulations")
             # Check if both wavelengths and fwhm are provided for building the LUT
@@ -220,6 +199,20 @@ class RadiativeTransferEngine:
             self.lut_grid = lut_grid
             self.lut_names = list(lut_grid)
             self.points = common.combos(lut_grid.values())
+
+            # Verify no duplicates exist else downstream functions will fail
+            duplicates = False
+            for dim, vals in lut_grid.items():
+                if np.unique(vals).size < len(vals):
+                    duplicates = True
+                    Logger.error(
+                        f"Duplicates values were detected in the lut_grid for {dim}: {vals}"
+                    )
+
+            if duplicates:
+                raise AttributeError(
+                    "Input lut_grid detected to have duplicates, please correct them before continuing"
+                )
 
             Logger.info(f"Initializing LUT file")
             self.lut = luts.Create(
@@ -253,12 +246,12 @@ class RadiativeTransferEngine:
         self.cached = SimpleNamespace(point=np.array([]))
         Logger.debug(f"LUTs fully loaded")
 
+        # For each point index, determine if that point derives from Geometry or x_RT
+        self.indices = SimpleNamespace(geom={}, x_RT=[])
+
         # Attach interpolators
         if build_interpolators:
             self.build_interpolators()
-
-            # For each point index, determine if that point derives from Geometry or x_RT
-            self.indices = SimpleNamespace()
 
             # Hidden assumption: geometry keys come first, then come RTE keys
             self.geometry_input_names = set(self.geometry_input_names) - set(
@@ -269,6 +262,17 @@ class RadiativeTransferEngine:
                 for i, key in enumerate(self.lut_names)
                 if key in self.geometry_input_names
             }
+
+            # check if values of observer zenith in LUT are given in MODTRAN convention
+            self.indices.convert_observer_zenith = None
+            if "observer_zenith" in self.lut_grid.keys():
+                if any(np.array(self.lut_grid["observer_zenith"]) > 90.0):
+                    self.indices.convert_observer_zenith = [
+                        i
+                        for i in self.indices.geom
+                        if self.indices.geom[i] == "observer_zenith"
+                    ][0]
+
             # If it wasn't a geom key, it's x_RT
             self.indices.x_RT = list(set(range(self.n_point)) - set(self.indices.geom))
             Logger.debug(f"Interpolators built")
@@ -279,10 +283,6 @@ class RadiativeTransferEngine:
         self.lut[key]
         """
         return self.lut[key].load().data
-
-    @property
-    def lut_interp_types(self):
-        return np.array([self.angular_lut_keys.get(key, "n") for key in self.lut_names])
 
     def build_interpolators(self):
         """
@@ -304,7 +304,6 @@ class RadiativeTransferEngine:
             self.luts[key] = common.VectorInterpolator(
                 grid_input=grid,
                 data_input=ds[key].load().data,
-                lut_interp_types=self.lut_interp_types,
                 version=self.interpolator_style,
             )
 
@@ -399,6 +398,12 @@ class RadiativeTransferEngine:
         for i, key in self.indices.geom.items():
             point[i] = getattr(geom, key)
 
+        # convert observer zenith to MODTRAN convention if needed
+        if self.indices.convert_observer_zenith:
+            point[self.indices.convert_observer_zenith] = (
+                180.0 - point[self.indices.convert_observer_zenith]
+            )
+
         return self.interpolate(point)
 
     def interpolate(self, point: np.array) -> dict:
@@ -442,6 +447,7 @@ class RadiativeTransferEngine:
             readSim = ray.put(self.readSim)
             lut_path = ray.put(self.lut_path)
             buffer_time = ray.put(self.max_buffer_time)
+            rte_configure_and_exit = ray.put(self.engine_config.rte_configure_and_exit)
 
             jobs = [
                 streamSimulation.remote(
@@ -451,6 +457,7 @@ class RadiativeTransferEngine:
                     readSim,
                     lut_path,
                     max_buffer_time=buffer_time,
+                    rte_configure_and_exit=self.engine_config.rte_configure_and_exit,
                 )
                 for point in self.points
             ]
@@ -517,7 +524,6 @@ class RadiativeTransferEngine:
         case1: dict,
         case2: dict,
         coszen: float,
-        rfl0: float = 0,
         rfl1: float = 0.1,
         rfl2: float = 0.5,
     ) -> dict:
@@ -535,8 +541,6 @@ class RadiativeTransferEngine:
             MODTRAN output for surface reflectance = rfl2 (case 2 of the channel file)
         coszen: float
             ...
-        rfl0: float, defaults=0
-            Surface reflectance  for case 0 of the MODTRAN output
         rfl1: float, defaults=0.1
             Surface reflectance  for case 1 of the MODTRAN output
         rfl2: float, defaults=0.5
@@ -656,6 +660,7 @@ def streamSimulation(
     reader: Callable,
     output: str,
     max_buffer_time: float = 0.5,
+    rte_configure_and_exit: bool = False,
 ):
     """Run a simulation for a single point and stream the results to a saved lut file.
 
@@ -666,6 +671,7 @@ def streamSimulation(
         reader (function): function to read the results of the simulation
         output (str): LUT store to save results to
         max_buffer_time (float, optional): _description_. Defaults to 0.5.
+        rte_configure_and_exit (bool, optional): exit early if not executing simulations
     """
     Logger.debug(f"Simulating(point={point})")
 
@@ -674,6 +680,10 @@ def streamSimulation(
 
     # Execute the simulation
     simmer(point)
+
+    # No data will be produced, just configuration files
+    if rte_configure_and_exit:
+        return
 
     # Read the simulation results
     data = reader(point)

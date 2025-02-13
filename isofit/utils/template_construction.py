@@ -16,7 +16,6 @@ from typing import List
 import netCDF4 as nc
 import numpy as np
 from scipy.io import loadmat
-from sklearn import mixture
 from spectral.io import envi
 
 from isofit.core import isofit
@@ -201,13 +200,6 @@ class Pathnames:
                 self.input_model_discrepancy_path = join(
                     self.isofit_path, "data", "emit_model_discrepancy.mat"
                 )
-        elif args.sensor == "av3":
-            self.noise_path = None
-            logging.info("no noise path found, proceeding without")
-            if self.input_channelized_uncertainty_path is None:
-                self.input_channelized_uncertainty_path = join(
-                    self.isofit_path, "data", "av3_osf_uncertainty.txt"
-                )
         else:
             self.noise_path = None
             logging.info("no noise path found, proceeding without")
@@ -294,9 +286,16 @@ class LUTConfig:
 
     Args:
         lut_config_file: configuration file to override default values
+        emulator: emulator used - will modify required points appropriately
+        no_min_lut_spacing: span all LUT dimensions with at least 2 points
     """
 
-    def __init__(self, lut_config_file: str = None, emulator: bool = False):
+    def __init__(
+        self,
+        lut_config_file: str = None,
+        emulator: str = None,
+        no_min_lut_spacing: bool = False,
+    ):
         if lut_config_file is not None:
             with open(lut_config_file, "r") as f:
                 lut_config = json.load(f)
@@ -354,9 +353,8 @@ class LUTConfig:
 
         self.aot_550_spacing = 0
         self.aot_550_spacing_min = 0
-        
-        self.rte_auto_rebuild = True
-        self.flag_ocean_elevation = False
+
+        self.no_min_lut_spacing = no_min_lut_spacing
 
         # overwrite anything that comes in from the config file
         if lut_config_file is not None:
@@ -364,11 +362,18 @@ class LUTConfig:
                 if key in self.__dict__:
                     setattr(self, key, lut_config[key])
 
-        if emulator and os.path.splitext(emulator)[1] != ".jld2":
+        if emulator is not None and os.path.splitext(emulator)[1] != ".jld2":
             self.aot_550_range = self.aerosol_2_range
             self.aot_550_spacing = self.aerosol_2_spacing
             self.aot_550_spacing_min = self.aerosol_2_spacing_min
             self.aerosol_2_spacing = 0
+
+    def get_grid_with_data(
+        self, data_input: np.array, spacing: float, min_spacing: float
+    ):
+        min_val = np.min(data_input)
+        max_val = np.max(data_input)
+        return self.get_grid(min_val, max_val, spacing, min_spacing)
 
     def get_grid(
         self, minval: float, maxval: float, spacing: float, min_spacing: float
@@ -377,6 +382,15 @@ class LUTConfig:
             logging.debug("Grid spacing set at 0, using no grid.")
             return None
         num_gridpoints = int(np.ceil((maxval - minval) / spacing)) + 1
+
+        # if we want to ensure there is no minimum spacing, override the spacing
+        # value to set the number of grid points to at least 2
+        if (
+            self.no_min_lut_spacing
+            and num_gridpoints == 1
+            and np.isclose(maxval, minval) is False
+        ):
+            num_gridpoints = 2
 
         grid = np.linspace(minval, maxval, num_gridpoints)
 
@@ -387,7 +401,9 @@ class LUTConfig:
                 f"Grid spacing is 0, which is less than {min_spacing}.  No grid used"
             )
             return None
-        elif np.abs(grid[1] - grid[0]) < min_spacing:
+        elif (
+            np.abs(grid[1] - grid[0]) < min_spacing and self.no_min_lut_spacing is False
+        ):
             logging.debug(
                 f"Grid spacing is {grid[1]-grid[0]}, which is less than {min_spacing}. "
                 " No grid used"
@@ -395,123 +411,6 @@ class LUTConfig:
             return None
         else:
             return grid
-
-    def get_angular_grid(
-        self,
-        angle_data_input: np.array,
-        spacing: float,
-        min_spacing: float,
-        units: str = "d",
-    ):
-        """Find either angular data 'center points' (num_points = 1), or a lut set that spans
-        angle variation in a systematic fashion.
-
-        Args:
-            angle_data_input: set of angle data to use to find center points
-            spacing: the desired angular spacing between points, or mean if -1
-            min_spacing: the minimum angular spacing between points allowed (if less, no grid)
-            units: specifies if data are in degrees (default) or radians
-
-        :Returns:
-            angular data center point or lut set spanning space
-
-        """
-        if spacing == 0:
-            logging.debug("Grid spacing set at 0, using no grid.")
-            return None
-
-        # Convert everything to radians so we don't have to track throughout
-        if units == "r":
-            angle_data = np.rad2deg(angle_data_input)
-        else:
-            angle_data = angle_data_input.copy()
-
-        spatial_data = np.hstack(
-            [
-                np.cos(np.deg2rad(angle_data)).reshape(-1, 1),
-                np.sin(np.deg2rad(angle_data)).reshape(-1, 1),
-            ]
-        )
-
-        # find which quadrants have data
-        quadrants = np.zeros((2, 2))
-        if np.any(np.logical_and(spatial_data[:, 0] > 0, spatial_data[:, 1] > 0)):
-            quadrants[1, 0] = 1
-        if np.any(np.logical_and(spatial_data[:, 0] > 0, spatial_data[:, 1] < 0)):
-            quadrants[1, 1] += 1
-        if np.any(np.logical_and(spatial_data[:, 0] < 0, spatial_data[:, 1] > 0)):
-            quadrants[0, 0] += 1
-        if np.any(np.logical_and(spatial_data[:, 0] < 0, spatial_data[:, 1] < 0)):
-            quadrants[0, 1] += 1
-
-        # Handle the case where angles are < 180 degrees apart
-        if np.sum(quadrants) < 3 and spacing != -1:
-            if np.sum(quadrants[1, :]) == 2:
-                # If angles cross the 0-degree line:
-                angle_spread = self.get_grid(
-                    np.min(angle_data + 180),
-                    np.max(angle_data + 180),
-                    spacing,
-                    min_spacing,
-                )
-                if angle_spread is None:
-                    return None
-                else:
-                    return angle_spread - 180
-            else:
-                # Otherwise, just space things out:
-                return self.get_grid(
-                    np.min(angle_data), np.max(angle_data), spacing, min_spacing
-                )
-        else:
-            if spacing >= 180:
-                logging.warning(
-                    f"Requested angle spacing is {spacing}, but obs angle divergence is"
-                    " > 180.  Tighter  spacing recommended"
-                )
-
-            # If we're greater than 180 degree spread, there's no universal answer. Try GMM.
-            if spacing == -1:
-                num_points = 1
-            else:
-                # This very well might overly space the grid, but we don't / can't know in general
-                num_points = int(np.ceil(360 / spacing))
-
-            # We initialize the GMM with a static seed for repeatability across runs
-            gmm = mixture.GaussianMixture(
-                n_components=num_points, covariance_type="full", random_state=1
-            )
-            if spatial_data.shape[0] == 1:
-                spatial_data = np.vstack([spatial_data, spatial_data])
-
-            # Protect memory against huge images
-            if spatial_data.shape[0] > 1e6:
-                use = np.linspace(0, spatial_data.shape[0] - 1, int(1e6), dtype=int)
-                spatial_data = spatial_data[use, :]
-
-            gmm.fit(spatial_data)
-            central_angles = np.degrees(np.arctan2(gmm.means_[:, 1], gmm.means_[:, 0]))
-            if num_points == 1:
-                return central_angles[0]
-
-            ca_quadrants = np.zeros((2, 2))
-            if np.any(np.logical_and(gmm.means_[:, 0] > 0, gmm.means_[:, 1] > 0)):
-                ca_quadrants[1, 0] = 1
-            elif np.any(np.logical_and(gmm.means_[:, 0] > 0, gmm.means_[:, 1] < 0)):
-                ca_quadrants[1, 1] += 1
-            elif np.any(np.logical_and(gmm.means_[:, 0] < 0, gmm.means_[:, 1] > 0)):
-                ca_quadrants[0, 0] += 1
-            elif np.any(np.logical_and(gmm.means_[:, 0] < 0, gmm.means_[:, 1] < 0)):
-                ca_quadrants[0, 1] += 1
-
-            if np.sum(ca_quadrants) < np.sum(quadrants):
-                logging.warning(
-                    f"GMM angles {central_angles} span"
-                    f" {np.sum(ca_quadrants)} quadrants, while data spans"
-                    f" {np.sum(ca_quadrants)} quadrants"
-                )
-
-            return central_angles
 
 
 class SerialEncoder(json.JSONEncoder):
@@ -524,150 +423,6 @@ class SerialEncoder(json.JSONEncoder):
             return float(obj)
         else:
             return super(SerialEncoder, self).default(obj)
-
-
-def get_grid(minval: float, maxval: float, spacing: float, min_spacing: float):
-    if spacing == 0:
-        logging.debug("Grid spacing set at 0, using no grid.")
-        return None
-
-    num_gridpoints = int(np.ceil((maxval - minval) / spacing)) + 1
-
-    grid = np.linspace(minval, maxval, num_gridpoints)
-
-    if min_spacing > 0.0001:
-        grid = np.round(grid, 4)
-
-    if len(grid) == 1:
-        logging.debug(
-            f"Grid spacing is 0, which is less than {min_spacing}.  No grid used"
-        )
-        return None
-    elif np.abs(grid[1] - grid[0]) < min_spacing:
-        logging.debug(
-            f"Grid spacing is {grid[1] - grid[0]}, which is less than {min_spacing}. "
-            " No grid used"
-        )
-        return None
-    else:
-        return grid
-
-
-def get_angular_grid(
-    angle_data_input: np.array, spacing: float, min_spacing: float, units: str = "d"
-):
-    """Find either angular data "center points" (num_points = 1), or a lut set that spans
-    angle variation in a systematic fashion.
-
-    Args:
-        angle_data_input: set of angle data to use to find center points
-        spacing: the desired angular spacing between points, or mean if -1
-        min_spacing: the minimum angular spacing between points allowed (if less, no grid)
-        units: specifies if data are in degrees (default) or radians
-
-    :Returns:
-        angular data center point or lut set spanning space
-    """
-    if spacing == 0:
-        logging.debug("Grid spacing set at 0, using no grid.")
-        return None
-
-    # Convert everything to radians so we don"t have to track throughout
-    if units == "r":
-        angle_data = np.rad2deg(angle_data_input)
-    else:
-        angle_data = angle_data_input.copy()
-
-    spatial_data = np.hstack(
-        [
-            np.cos(np.deg2rad(angle_data)).reshape(-1, 1),
-            np.sin(np.deg2rad(angle_data)).reshape(-1, 1),
-        ]
-    )
-
-    # find which quadrants have data
-    quadrants = np.zeros((2, 2))
-
-    if np.any(np.logical_and(spatial_data[:, 0] > 0, spatial_data[:, 1] > 0)):
-        quadrants[1, 0] = 1
-
-    if np.any(np.logical_and(spatial_data[:, 0] > 0, spatial_data[:, 1] < 0)):
-        quadrants[1, 1] += 1
-
-    if np.any(np.logical_and(spatial_data[:, 0] < 0, spatial_data[:, 1] > 0)):
-        quadrants[0, 0] += 1
-
-    if np.any(np.logical_and(spatial_data[:, 0] < 0, spatial_data[:, 1] < 0)):
-        quadrants[0, 1] += 1
-
-    # Handle the case where angles are < 180 degrees apart
-    if np.sum(quadrants) < 3 and spacing != -1:
-        if np.sum(quadrants[1, :]) == 2:
-            # If angles cross the 0-degree line:
-            angle_spread = get_grid(
-                np.min(angle_data + 180), np.max(angle_data + 180), spacing, min_spacing
-            )
-
-            if angle_spread is None:
-                return None
-            else:
-                return angle_spread - 180
-        else:
-            # Otherwise, just space things out:
-            return get_grid(
-                np.min(angle_data), np.max(angle_data), spacing, min_spacing
-            )
-    else:
-        if spacing >= 180:
-            logging.warning(
-                f"Requested angle spacing is {spacing}, but obs angle divergence is >"
-                " 180.  Tighter  spacing recommended"
-            )
-
-        # If we"re greater than 180 degree spread, there"s no universal answer. Try GMM.
-        if spacing == -1:
-            num_points = 1
-        else:
-            # This very well might overly space the grid, but we don"t / can"t know in general
-            num_points = int(np.ceil(360 / spacing))
-
-        # We initialize the GMM with a static seed for repeatability across runs
-        gmm = mixture.GaussianMixture(
-            n_components=num_points, covariance_type="full", random_state=1
-        )
-
-        if spatial_data.shape[0] == 1:
-            spatial_data = np.vstack([spatial_data, spatial_data])
-
-        # Protect memory against huge images
-        if spatial_data.shape[0] > 1e6:
-            use = np.linspace(0, spatial_data.shape[0] - 1, int(1e6), dtype=int)
-            spatial_data = spatial_data[use, :]
-
-        gmm.fit(spatial_data)
-        central_angles = np.degrees(np.arctan2(gmm.means_[:, 1], gmm.means_[:, 0]))
-
-        if num_points == 1:
-            return central_angles[0]
-
-        ca_quadrants = np.zeros((2, 2))
-
-        if np.any(np.logical_and(gmm.means_[:, 0] > 0, gmm.means_[:, 1] > 0)):
-            ca_quadrants[1, 0] = 1
-        elif np.any(np.logical_and(gmm.means_[:, 0] > 0, gmm.means_[:, 1] < 0)):
-            ca_quadrants[1, 1] += 1
-        elif np.any(np.logical_and(gmm.means_[:, 0] < 0, gmm.means_[:, 1] > 0)):
-            ca_quadrants[0, 0] += 1
-        elif np.any(np.logical_and(gmm.means_[:, 0] < 0, gmm.means_[:, 1] < 0)):
-            ca_quadrants[0, 1] += 1
-
-        if np.sum(ca_quadrants) < np.sum(quadrants):
-            logging.warning(
-                f"GMM angles {central_angles} span {np.sum(ca_quadrants)} quadrants, "
-                f"while data spans {np.sum(quadrants)} quadrants"
-            )
-
-        return central_angles
 
 
 def check_surface_model(surface_path: str, wl: np.array, paths: Pathnames) -> str:
@@ -770,8 +525,8 @@ def build_presolve_config(
 
     # set up specific presolve LUT grid
     lut_grid = {"H2OSTR": [float(x) for x in h2o_lut_grid]}
-    if engine_name == "KernelFlowsGP":
-        from isofit.radiative_transfer.kernel_flows import bounds_check
+    if emulator_base is not None and os.path.splitext(emulator_base)[1] == ".jld2":
+        from isofit.radiative_transfer.engines.kernel_flows import bounds_check
 
         bounds_check(lut_grid, emulator_base, modify=True)
 
@@ -1049,7 +804,7 @@ def build_main_config(
         if to_sensor_zenith_lut_grid is not None and len(to_sensor_zenith_lut_grid) > 1:
             radiative_transfer_config["lut_grid"][
                 "observer_zenith"
-            ] = to_sensor_zenith_lut_grid.tolist()  # modtran convention
+            ] = to_sensor_zenith_lut_grid.tolist()
         if to_sun_zenith_lut_grid is not None and len(to_sun_zenith_lut_grid) > 1:
             radiative_transfer_config["lut_grid"][
                 "solar_zenith"
@@ -1068,7 +823,7 @@ def build_main_config(
     ] = rtc_ln
 
     if emulator_base is not None and os.path.splitext(emulator_base)[1] == ".jld2":
-        from isofit.radiative_transfer.kernel_flows import bounds_check
+        from isofit.radiative_transfer.engines.kernel_flows import bounds_check
 
         bounds_check(radiative_transfer_config["lut_grid"], emulator_base, modify=True)
         # modify so we set the statevector appropriately
@@ -1081,6 +836,13 @@ def build_main_config(
 
     if prebuilt_lut_path is not None:
         ncds = nc.Dataset(prebuilt_lut_path, "r")
+
+        # first, check if observer zenith angle in prebuilt LUT comes in MODTRAN convention
+        # and convert lut grid as needed
+        if any(np.array(ncds["observer_zenith"]) > 90.0):
+            to_sensor_zenith_lut_grid = np.sort(
+                [180 - x for x in to_sensor_zenith_lut_grid]
+            )
 
         radiative_transfer_config["radiative_transfer_engines"]["vswir"]["lut_names"][
             "H2OSTR"
@@ -1243,7 +1005,7 @@ def build_main_config(
             "radiometry_correction_file"
         ] = paths.rdn_factors_path
 
-    # write modtran_template
+    # write main config file
     with open(paths.isofit_full_config_path, "w") as fout:
         fout.write(
             json.dumps(
@@ -1288,8 +1050,8 @@ def write_modtran_template(
         fid:               flight line id (name)
         altitude_km:       altitude of the sensor in km
         dayofyear:         the current day of the given year
-        to_sensor_azimuth: azimuth view angle to the sensor, in degrees (AVIRIS convention)
-        to_sensor_zenith:  sensor/observer zenith angle, in degrees (MODTRAN convention: 180 - AVIRIS convention)
+        to_sensor_azimuth: azimuth view angle to the sensor, in degrees
+        to_sensor_zenith:  sensor/observer zenith angle, in degrees
         to_sun_zenith:     final altitude solar zenith angle (0→180°)
         relative_azimuth:  final altitude relative solar azimuth (0→360°)
         gmtime:            greenwich mean time
@@ -1338,7 +1100,7 @@ def write_modtran_template(
                         "PARM1": relative_azimuth,
                         "PARM2": to_sun_zenith,
                         "TRUEAZ": to_sensor_azimuth,
-                        "OBSZEN": to_sensor_zenith,
+                        "OBSZEN": 180 - to_sensor_zenith,  # MODTRAN convention
                         "GMTIME": gmtime,
                     },
                     "SURFACE": {
@@ -1416,7 +1178,7 @@ def load_climatology(
     ]
 
     for _a, alr in enumerate(aerosol_lut_ranges):
-        aerosol_lut = get_grid(
+        aerosol_lut = lut_params.get_grid(
             alr[0], alr[1], aerosol_lut_spacing[_a], aerosol_lut_spacing_mins[_a]
         )
 
@@ -1431,7 +1193,7 @@ def load_climatology(
 
             aerosol_lut_grid["AERFRAC_{}".format(_a)] = aerosol_lut.tolist()
 
-    aot_550_lut = get_grid(
+    aot_550_lut = lut_params.get_grid(
         lut_params.aot_550_range[0],
         lut_params.aot_550_range[1],
         lut_params.aot_550_spacing,
@@ -1726,30 +1488,22 @@ def get_metadata_from_obs(
     mean_path_km = np.mean(path_km[valid])
     del path_km
 
-    mean_to_sensor_azimuth = (
-        lut_params.get_angular_grid(to_sensor_azimuth[valid], -1, 0) % 360
-    )
-    mean_to_sun_azimuth = (
-        lut_params.get_angular_grid(to_sun_azimuth[valid], -1, 0) % 360
-    )
-    mean_to_sensor_zenith = 180 - lut_params.get_angular_grid(
-        to_sensor_zenith[valid], -1, 0
-    )
-    mean_to_sun_zenith = lut_params.get_angular_grid(to_sun_zenith[valid], -1, 0)
-    mean_relative_azimuth = (
-        lut_params.get_angular_grid(relative_azimuth[valid], -1, 0) % 360
-    )
+    mean_to_sensor_azimuth = np.mean(to_sensor_azimuth[valid]) % 360
+    mean_to_sun_azimuth = np.mean(to_sun_azimuth[valid]) % 360
+    mean_to_sensor_zenith = np.mean(to_sensor_zenith[valid])
+    mean_to_sun_zenith = np.mean(to_sun_zenith[valid])
+    mean_relative_azimuth = np.mean(relative_azimuth[valid])
 
     # geom_margin = EPS * 2.0
-    to_sensor_zenith_lut_grid = lut_params.get_angular_grid(
+    to_sensor_zenith_lut_grid = lut_params.get_grid_with_data(
         to_sensor_zenith[valid],
         lut_params.to_sensor_zenith_spacing,
         lut_params.to_sensor_zenith_spacing_min,
     )
     if to_sensor_zenith_lut_grid is not None:
-        to_sensor_zenith_lut_grid = np.sort(180 - to_sensor_zenith_lut_grid)
+        to_sensor_zenith_lut_grid = np.sort(to_sensor_zenith_lut_grid)
 
-    to_sun_zenith_lut_grid = lut_params.get_angular_grid(
+    to_sun_zenith_lut_grid = lut_params.get_grid_with_data(
         to_sun_zenith[valid],
         lut_params.to_sun_zenith_spacing,
         lut_params.to_sun_zenith_spacing_min,
@@ -1757,7 +1511,7 @@ def get_metadata_from_obs(
     if to_sun_zenith_lut_grid is not None:
         to_sun_zenith_lut_grid = np.sort(to_sun_zenith_lut_grid)
 
-    relative_azimuth_lut_grid = lut_params.get_angular_grid(
+    relative_azimuth_lut_grid = lut_params.get_grid_with_data(
         relative_azimuth[valid],
         lut_params.relative_azimuth_spacing,
         lut_params.relative_azimuth_spacing_min,
@@ -1850,11 +1604,8 @@ def get_metadata_from_loc(
         valid[-trim_lines:, :] = False
 
     # Grab zensor position and orientation information
-    mean_latitude = lut_params.get_angular_grid(loc_data[1, valid].flatten(), -1, 0)
-    mean_longitude = lut_params.get_angular_grid(
-        -1 * loc_data[0, valid].flatten(), -1, 0
-    )
-
+    mean_latitude = np.mean(loc_data[1, valid].flatten())
+    mean_longitude = np.mean(-1 * loc_data[0, valid].flatten())
     mean_elevation_km = np.mean(loc_data[2, valid]) / 1000.0
 
     # make elevation grid

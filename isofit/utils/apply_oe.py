@@ -8,6 +8,7 @@ import os
 import subprocess
 from datetime import datetime
 from os.path import exists, join
+from shutil import copyfile
 from types import SimpleNamespace
 
 import click
@@ -74,6 +75,7 @@ INVERSION_WINDOWS = [[350.0, 1360.0], [1410, 1800.0], [1970.0, 2500.0]]
 @click.option("--atm_sigma", "-as", type=float, multiple=True, default=[2])
 @click.option("--pressure_elevation", is_flag=True, default=False)
 @click.option("--prebuilt_lut", type=str)
+@click.option("--no_min_lut_spacing", is_flag=True, default=False)
 @click.option(
     "--debug-args",
     help="Prints the arguments list without executing the command",
@@ -234,7 +236,9 @@ def apply_oe(args):
                 raise ValueError(err_str)
     logging.info("...Data file checks complete")
 
-    lut_params = tmpl.LUTConfig(args.lut_config_file, args.emulator_base)
+    lut_params = tmpl.LUTConfig(
+        args.lut_config_file, args.emulator_base, args.no_min_lut_spacing
+    )
 
     logging.info("Setting up files and directories....")
     paths = tmpl.Pathnames(args)
@@ -365,6 +369,10 @@ def apply_oe(args):
         surface_path=args.surface_path, wl=wl, paths=paths
     )
 
+    # re-stage surface model if needed
+    if paths.surface_path != args.surface_path:
+        copyfile(paths.surface_path, paths.surface_working_path)
+
     (
         mean_latitude,
         mean_longitude,
@@ -373,11 +381,6 @@ def apply_oe(args):
     ) = tmpl.get_metadata_from_loc(
         paths.loc_working_path, lut_params, pressure_elevation=args.pressure_elevation
     )
-
-    if lut_params.flag_ocean_elevation:
-        elevation_lut_grid = None
-        #mean_elevation_km = 0.0001 #KF emulator
-        mean_elevation_km = 0.0 #MODTRAN
 
     if args.emulator_base is not None:
         if elevation_lut_grid is not None and np.any(elevation_lut_grid < 0):
@@ -401,10 +404,8 @@ def apply_oe(args):
                 f" targets below sea level in km units.  Setting mean elevation to 0."
             )
 
-    # Need a 180 - here, as this is already in MODTRAN convention
     mean_altitude_km = (
-        mean_elevation_km
-        + np.cos(np.deg2rad(180 - mean_to_sensor_zenith)) * mean_path_km
+        mean_elevation_km + np.cos(np.deg2rad(mean_to_sensor_zenith)) * mean_path_km
     )
 
     logging.info("Observation means:")
@@ -612,7 +613,7 @@ def apply_oe(args):
             inversion_windows=INVERSION_WINDOWS,
         )
 
-        # Run modtran retrieval
+        # Run retrieval
         logging.info("Running ISOFIT with full LUT")
         retrieval_full = isofit.Isofit(
             paths.isofit_full_config_path, level="INFO", logfile=args.log_file
@@ -670,7 +671,6 @@ def apply_oe(args):
 
     logging.info("Done.")
     ray.shutdown()
-
 
 
 if __name__ == "__main__":

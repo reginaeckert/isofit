@@ -16,6 +16,7 @@
 # ISOFIT: Imaging Spectrometer Optimal FITting
 # Author: Philip G Brodrick, philip.brodrick@jpl.nasa.gov
 #
+from __future__ import annotations
 
 import datetime
 import logging
@@ -29,14 +30,10 @@ import numpy as np
 import yaml
 from scipy.interpolate import interp1d
 
-from isofit.configs.sections.radiative_transfer_config import (
-    RadiativeTransferEngineConfig,
-)
 from isofit.core.common import resample_spectrum
-from isofit.core.sunposition import sunpos
 from isofit.radiative_transfer import luts
+from isofit.radiative_transfer.engines import SixSRT
 from isofit.radiative_transfer.radiative_transfer_engine import RadiativeTransferEngine
-from isofit.radiative_transfer.six_s import SixSRT
 
 Logger = logging.getLogger(__file__)
 
@@ -90,7 +87,6 @@ class SimulatedModtranRT(RadiativeTransferEngine):
         "transm_up_dir",  # NOTE: Formerly transup
     }
 
-
     def preSim(self):
         """
         sRTMnet leverages 6S to simulate results which is best done before sRTMnet begins
@@ -135,6 +131,10 @@ class SimulatedModtranRT(RadiativeTransferEngine):
             modtran_emulation=True,
             build_interpolators=False,
         )
+
+        if self.engine_config.rte_configure_and_exit:
+            return
+
         # Extract useful information from the sim
         self.esd = sim.esd
         self.sim_lut_path = config.lut_path
@@ -245,10 +245,12 @@ def build_sixs_config(engine_config):
     relative_azimuth = data["GEOMETRY"]["PARM1"]
     observer_azimuth = data["GEOMETRY"]["TRUEAZ"]
     # RT simulations commonly only depend on the relative azimuth,
-    # so we don't care if we do OBSZEN + or - RELAZ.
-    # In addition, sRTMnet was only trained on RELAZ = 0°,
+    # so we don't care if we do view azimuth + or - relative azimuth.
+    # In addition, sRTMnet was only trained on relative azimuth = 0°,
     # so providing different values here would have no implications.
-    solar_azimuth = observer_azimuth + relative_azimuth
+    solar_azimuth = np.minimum(
+        observer_azimuth + relative_azimuth, observer_azimuth - relative_azimuth
+    )
     solar_zenith = data["GEOMETRY"]["PARM2"]
 
     # Tweak parameter values for sRTMnet
@@ -261,6 +263,8 @@ def build_sixs_config(engine_config):
     config.alt = data["GEOMETRY"]["H1ALT"]
     config.solzen = solar_zenith
     config.solaz = solar_azimuth
+    # the MODTRAN config provides the view zenith in MODTRAN convention,
+    # so substract from 180 here as 6s follows the ANG OBS file convention
     config.viewzen = 180 - data["GEOMETRY"]["OBSZEN"]
     config.viewaz = observer_azimuth
     config.wlinf = 0.35

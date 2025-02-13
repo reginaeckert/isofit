@@ -17,6 +17,7 @@
 # Author: Niklas Bohn, urs.n.bohn@jpl.nasa.gov
 #         Philip Brodrick, philip.brodrick@jpl.nasa.gov
 #         Jouni Susiluoto, jouni.i.susiluoto@jpl.nasa.gov
+from __future__ import annotations
 
 import logging
 
@@ -24,9 +25,6 @@ import h5py
 import numpy as np
 import yaml
 
-from isofit.configs.sections.radiative_transfer_config import (
-    RadiativeTransferEngineConfig,
-)
 from isofit.core.common import combos, spectral_response_function
 from isofit.radiative_transfer.radiative_transfer_engine import RadiativeTransferEngine
 
@@ -50,7 +48,6 @@ KEYMAPPING = {
 def bounds_check(
     grid: dict,
     emulator_file: str = None,
-    emulator: h5py.File = None,
     modify: bool = False,
 ):
     """Check if the grid points are within the bounds of the emulator
@@ -68,9 +65,12 @@ def bounds_check(
         emulator = h5py.File(emulator_file, "r")
         points_bound_min = emulator["xmin"][:]
         points_bound_max = emulator["xmax"][:]
-        from isofit.radiative_transfer.kernel_flows import KEYMAPPING
 
         emulator_names = [KEYMAPPING[i]["name"] for i in emulator["inputdims"]]
+
+    # convert observer zenith grid to MODTRAN convetion.
+    if "observer_zenith" in grid.keys():
+        grid["observer_zenith"] = [180 - x for x in grid["observer_zenith"]]
 
     grid_errors = []
     for _key, key in enumerate(emulator_names):
@@ -101,6 +101,10 @@ def bounds_check(
     if len(grid_errors) > 0:
         grid_errors = "\n".join(grid_errors)
         raise ValueError(grid_errors)
+
+    # back-convert observer zenith grid to MODTRAN convetion.
+    if "observer_zenith" in grid.keys():
+        grid["observer_zenith"] = [180 - x for x in grid["observer_zenith"]]
 
 
 def predict_M(
@@ -194,6 +198,7 @@ class KernelFlowsRT(RadiativeTransferEngine):
             logging.info("No solar_zenith default in template")
 
         try:
+            # the KF emulator follows the MODTRAN convention for the view zenith
             KEYMAPPING[6]["default"] = template["MODTRAN"][0]["MODTRANINPUT"][
                 "GEOMETRY"
             ]["OBSZEN"]
@@ -203,16 +208,16 @@ class KernelFlowsRT(RadiativeTransferEngine):
         try:
             KEYMAPPING[7]["default"] = template["MODTRAN"][0]["MODTRANINPUT"][
                 "GEOMETRY"
-            ]["TRUEAZ"]
+            ]["PARM1"]
         except:
             logging.info("No relative_azimuth default in template")
 
         try:
-            KEYMAPPING[8]["default"] = template["MODTRAN"][0]["MODTRANINPUT"][
+            KEYMAPPING[9]["default"] = template["MODTRAN"][0]["MODTRANINPUT"][
                 "GEOMETRY"
-            ]["PARM1"]
+            ]["TRUEAZ"]
         except:
-            logging.info("No solar_azimuth default in template")
+            logging.info("No observer_azimuth default in template")
 
         # defining some input transformations
         self.input_transfs = [
@@ -322,6 +327,12 @@ class KernelFlowsRT(RadiativeTransferEngine):
         np.set_printoptions(suppress=True)
         point = self.default_fills.copy()
         point[self.emulator_inds_to_point_inds] = in_point
+
+        # observer zenith in LUT grid comes in ANG OBS file convention.
+        # convert to MODTRAN convention as KF emulator is trained on that
+        point[self.emulator_names.index("observer_zenith")] = (
+            180 - point[self.emulator_names.index("observer_zenith")]
+        )
 
         if np.any(point < self.points_bound_min) or np.any(
             point > self.points_bound_max

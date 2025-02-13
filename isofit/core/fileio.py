@@ -17,6 +17,7 @@
 # ISOFIT: Imaging Spectrometer Optimal FITting
 # Author: David R Thompson, david.r.thompson@jpl.nasa.gov
 #
+from __future__ import annotations
 
 import logging
 import os
@@ -24,19 +25,15 @@ from collections import OrderedDict
 from typing import List
 
 import numpy as np
-import scipy.interpolate
 import scipy.io
 import xarray as xr
 from spectral.io import envi
 
-from isofit.configs import Config
-from isofit.core.common import envi_header
-from isofit.core.forward import ForwardModel
-from isofit.inversion.inverse import Inversion
-from isofit.inversion.inverse_simple import invert_algebraic, invert_simple
-
-from .common import eps, load_spectrum, resample_spectrum
-from .geometry import Geometry
+import isofit
+from isofit.core.common import envi_header, eps, load_spectrum, resample_spectrum
+from isofit.core.geometry import Geometry
+from isofit.data import env
+from isofit.inversion.inverse_simple import invert_algebraic
 
 ### Variables ###
 
@@ -437,6 +434,9 @@ class IO:
             filename = self.config.input.radiometry_correction_file
             self.radiance_correction, wl = load_spectrum(filename)
 
+        # Load the earth sun distance data
+        self.esd = self.load_esd()
+
     def get_components_at_index(self, row: int, col: int) -> InputData:
         """
         Load data from input files at the specified (row, col) index.
@@ -486,7 +486,7 @@ class IO:
 
         ## Check for any bad data flags
         for source in self.input_datasets:
-            if np.all(abs(data[source] - self.input_datasets[source].flag) < eps):
+            if np.allclose(data[source], self.input_datasets[source].flag):
                 return None
 
         # We build the geometry object for this spectrum.  For files not
@@ -495,6 +495,7 @@ class IO:
         geom = Geometry(
             obs=data["obs_file"],
             loc=data["loc_file"],
+            esd=self.esd,
             bg_rfl=data["background_reflectance_file"],
         )
 
@@ -743,6 +744,38 @@ class IO:
         self.write_datasets(
             row, col, to_write, states, flush_immediately=flush_immediately
         )
+
+    @staticmethod
+    def load_esd(file=None):
+        """
+        Loads an earth_sun_distance file. Defaults to the
+        [env.data]/earth_sun_distance.txt if not provided
+
+        Parameters
+        ----------
+        file : str, default=None
+            ESD file to load
+
+        Returns
+        -------
+        np.array
+            Loaded ESD. If the file fails to load, creates a default
+        """
+        if file is None:
+            file = os.path.join(env.data, "earth_sun_distance.txt")
+
+        try:
+            esd = np.loadtxt(file)
+            logging.debug(f"Loaded ESD from file: {file}")
+        except FileNotFoundError:
+            logging.warning(
+                "Earth-sun-distance file not found on system. "
+                "Proceeding without might cause some inaccuracies down the line."
+            )
+            esd = np.ones((366, 2))
+            esd[:, 0] = np.arange(1, 367, 1)
+
+        return esd
 
 
 def write_bil_chunk(

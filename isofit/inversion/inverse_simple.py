@@ -16,6 +16,7 @@
 #
 # ISOFIT: Imaging Spectrometer Optimal FITting
 # Author: David R Thompson, david.r.thompson@jpl.nasa.gov
+from __future__ import annotations
 
 import os
 from typing import OrderedDict
@@ -32,11 +33,6 @@ from isofit.core.common import (
     get_refractive_index,
     svd_inv_sqrt,
 )
-from isofit.core.forward import ForwardModel
-from isofit.core.geometry import Geometry
-from isofit.core.instrument import Instrument
-from isofit.radiative_transfer.radiative_transfer import RadiativeTransfer
-from isofit.surface.surface import Surface
 
 
 def heuristic_atmosphere(
@@ -277,10 +273,10 @@ def invert_analytical(
     # x_alg contains [rfl_est, Ls_est, coeffs]
 
     if fm.RT.glint_model:
-        x_surf = fm.surface.fit_params(x_alg[0], geom) 
+        x_surf = fm.surface.fit_params(x_alg[0], geom)
         x[fm.idx_surface] = x_surf
         # Initial guess for reflectance and glint parameters based on the algebraic inversion
-        # Glint initialization comes from band 900 nm +/- 2 bands
+        # Glint initialization currently comes from instrument band at ~1020 nm
     else:
         x[fm.idx_surface] = x_alg[0]
 
@@ -300,7 +296,7 @@ def invert_analytical(
 
     if fm.RT.glint_model:
         winglintidx = np.concatenate(
-            (winidx, fm.idx_surface[-2:]), axis=0
+            (winidx, fm.idx_surf_nonrfl), axis=0
         )  # Include glint indices
         outside_ret_windows = np.ones(len(fm.idx_surface), dtype=bool)
         outside_ret_windows[winglintidx] = False
@@ -356,7 +352,7 @@ def invert_analytical(
             x[fm.idx_surface] = full_xk
             trajectory.append(x)
 
-        if fm.full_glint:
+        if fm.surface.full_glint:
             trajectory.append(trajectory[-1][-2] * g_dir)
             trajectory.append(trajectory[-1][-1] * g_dif)
 
@@ -409,7 +405,6 @@ def invert_analytical(
     if diag_uncert:
         full_unc = np.ones(len(x))
         if fm.RT.glint_model:
-            # C_rcond_idx = np.concatenate((winidx, fm.idx_surface[-2:]), axis=0)
             full_unc[winglintidx] = np.sqrt(np.diag(C_rcond))
         else:
             full_unc[winidx] = np.sqrt(np.diag(C_rcond))
