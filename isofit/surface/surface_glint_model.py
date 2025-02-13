@@ -64,7 +64,8 @@ class GlintModelSurface(MultiComponentSurface):
         """Given a reflectance estimate and one or more emissive parameters,
         fit a state vector."""
         # Estimate reflectance, assuming all signal around 1020 nm == glint
-        glint_band = np.argmin(abs(1020 - self.wl))
+        init_wvl = 900 #1020
+        glint_band = np.argmin(abs(init_wvl - self.wl))
         glint_est = np.mean(rfl_meas[(glint_band - 2) : glint_band + 2])
         bounds_glint_est = [0,0.2] #Stealing the bounds for this from additive_glint_model
         glint_est = max(
@@ -75,7 +76,7 @@ class GlintModelSurface(MultiComponentSurface):
         x = MultiComponentSurface.fit_params(self, lamb_est, geom) #Bounds reflectance
 
         #Get estimate for g_dd and g_dsf parameters, given signal at 900 nm
-        g_dsf_est = 0.01 #Set to a static number; don't need to apply bounds because static
+        g_dsf_est = 0.1 #Set to a static number; don't need to apply bounds because static
         #Use nadir fresnel coeffs (0.02) and t_down_dir = 0.83, t_down_diff = 0.14 for initialization
         #Transmission values taken from MODTRAN sim with AERFRAC_2 = 0.5, H2OSTR = 0.5
         g_dd_est = ((glint_est*0.97/0.02) - 0.14*g_dsf_est)/0.83 
