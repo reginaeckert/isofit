@@ -430,6 +430,7 @@ class IO:
             )
 
         # Do we apply a radiance correction?
+        #***Not used anymore
         if self.config.input.radiometry_correction_file is not None:
             filename = self.config.input.radiometry_correction_file
             self.radiance_correction, wl = load_spectrum(filename)

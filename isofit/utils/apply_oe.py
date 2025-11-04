@@ -418,6 +418,13 @@ def apply_oe(
     if wavelength_path:
         if os.path.isfile(wavelength_path):
             chn, wl, fwhm = np.loadtxt(wavelength_path).T
+            
+            if wl_ds[0] > 100 and wl[0] < 100:
+                #Make sure they are in the same units for the comparison
+                wl = wl*1000.0
+                fwhm = fwhm*1000.0
+            logging.info(f'wl path 0: {wl[0]}, wl rdn 0: {wl_ds[0]}, len path: {len(chn)}, len rdn: {len(wl_ds)}')
+                
             if len(chn) != len(wl_ds) or not np.all(np.isclose(wl, wl_ds, atol=0.01)):
                 raise ValueError(
                     "Number of channels or center wavelengths provided in wavelength file do not match"
