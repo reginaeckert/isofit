@@ -341,6 +341,30 @@ class ModtranRT(RadiativeTransferEngine):
         if call.stdout:
             Logger.error(call.stdout.decode())
 
+        #Check if the required results exist post-sim
+        if not self.required_results_exist(filename_base):
+            Logger.warning(f"File doesn't exist post-sim, re-running: {filename_base}")
+            # Rerun the point until it is done
+            done = False
+            n_rerun = 0
+            while not done:
+                #Pause for a second
+                time.sleep(np.random.randint(1, 10))
+                if n_rerun >= 10:
+                    Logger.info(f"{n_rerun} reruns; stopping")
+                    raise FileNotFoundError(f"Appropriate files not found for: {filename_base}")
+                    # Throw error
+                #Rerun
+                call = subprocess.run(cmd, shell=True, timeout=timeout, cwd=self.sim_path, capture_output=True)
+                if call.stdout:
+                    Logger.error(call.stdout.decode())
+                #Try to load
+                if self.required_results_exist(filename_base):
+                    done=True
+                else:
+                    n_rerun += 1
+            
+
     def modtran_driver(self, overrides):
         """Write a MODTRAN 6.0 input file."""
 
