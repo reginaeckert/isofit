@@ -223,6 +223,8 @@ class Pathnames:
                 )
         elif sensor == "tanager":
             self.noise_path = str(env.path("data", "tanager1_noise_20241016.txt"))
+        elif sensor == "av5":
+            self.noise_path = '/store/reckert/asds_data/l1b_rdn/AVIRIS-5/AVIRIS-5_noise_model_truncated_wavelengths_20251117.txt'
         else:
             self.noise_path = None
             logging.info("no noise path found, proceeding without")

@@ -36,6 +36,7 @@ SUPPORTED_SENSORS = [
     "hyp",
     "prisma",
     "av3",
+    "av5",
     "gao",
     "oci",
     "tanager",
