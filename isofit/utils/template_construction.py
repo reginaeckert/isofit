@@ -254,6 +254,8 @@ class Pathnames:
             self.modtran_path = os.getenv("MODTRAN_DIR", env.modtran)
 
         self.sixs_path = os.getenv("SIXS_DIR", env.sixs)
+        logging.warning("SIXS DIR HACK")
+        self.sixs_path =  "/home/reckert/.isofit/sixs" 
 
         self.noise_path = None
         if sensor == "avcl":
