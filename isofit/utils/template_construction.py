@@ -253,6 +253,8 @@ class Pathnames:
             self.modtran_path = os.getenv("MODTRAN_DIR", env.modtran)
 
         self.sixs_path = os.getenv("SIXS_DIR", env.sixs)
+        logging.warning("SIXS DIR HACK")
+        self.sixs_path =  "/home/reckert/.isofit/sixs" 
 
         if sensor == "avcl":
             self.noise_path = str(env.path("data", "avirisc_noise.txt"))
@@ -270,6 +272,8 @@ class Pathnames:
                 )
         elif sensor == "tanager":
             self.noise_path = str(env.path("data", "tanager1_noise_20241016.txt"))
+        elif sensor == "av5":
+            self.noise_path = '/store/reckert/asds_data/l1b_rdn/AVIRIS-5/AVIRIS-5_noise_model_truncated_wavelengths_20251118.txt'
         else:
             self.noise_path = None
             logging.info("no noise path found, proceeding without")

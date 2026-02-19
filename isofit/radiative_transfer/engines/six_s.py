@@ -84,6 +84,9 @@ class SixSRT(RadiativeTransferEngine):
                 "Please either set the ENV to that INI value, or update the INI with the ENV via:"
             )
             Logger.warning("  isofit --path sixs $SIXS_DIR")
+            Logger.warning("SIXS DIR HACK")
+            os.environ["SIXS_DIR"] = "/home/reckert/.isofit/sixs"
+            env.sixs = "/home/reckert/.isofit/sixs"
 
         self.modtran_emulation = modtran_emulation
 
@@ -149,7 +152,9 @@ class SixSRT(RadiativeTransferEngine):
         cmd = self.rebuild_cmd(point, wlinf=self.wl[0], wlsup=self.wl[-1])
 
         if not self.engine_config.rte_configure_and_exit:
-            call = subprocess.run(cmd, shell=True, capture_output=True)
+            myenv = os.environ.copy()
+            myenv["SIXS_DIR"] = "/home/reckert/.isofit/sixs"
+            call = subprocess.run(cmd, shell=True, capture_output=True,env=myenv)
             if call.stdout:
                 Logger.error(call.stdout.decode())
 
