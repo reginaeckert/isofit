@@ -195,6 +195,8 @@ class Instrument:
             or config.statevector.WL_SPACE is not None
         ):
             self.calibration_fixed = False
+            # or config.statevector.FWHMPOLY_000 is not None
+            # or config.statevector.WLPOLY_000 is not None
 
     def xa(self):
         """Mean of prior distribution, calculated at state x."""
@@ -425,7 +427,17 @@ class Instrument:
             sp = splrep(channels, vals, s=0)
             xnew = np.arange(len(wl))
             fwhm = fwhm + splev(xnew, sp)
-
+        elif any([v.startswith("FWHMPOLY") for v in self.statevec_names]):
+            # polynomial representation
+            channels, vals = [], []
+            for i, v in enumerate(self.statevec_names):
+                if v.startswith("FWHMPOLY"):
+                    chan = float(v.split("_")[1])
+                    channels.append(chan)
+                    vals.append(x_instrument[i])
+            idx_sort = np.argsort(np.array(channels))
+            fwhm = fwhm + np.polyval(np.array(vals)[idx_sort],np.arange(len(wl)))
+        
         if "WL_SPACE" in self.statevec_names:
             ind = self.statevec_names.index("WL_SPACE")
             space = x_instrument[ind]
@@ -446,6 +458,16 @@ class Instrument:
             sp = splrep(channels, vals, s=0)
             xnew = np.arange(len(wl))
             shift = splev(xnew, sp)
+        elif any([v.startswith("WLPOLY") for v in self.statevec_names]):
+            # polynomial representation
+            channels, vals = [], []
+            for i, v in enumerate(self.statevec_names):
+                if v.startswith("WLPOLY"):
+                    chan = float(v.split("_")[1])
+                    channels.append(chan)
+                    vals.append(x_instrument[i])
+            idx_sort = np.argsort(np.array(channels))
+            shift = np.polyval(np.array(vals)[idx_sort],np.arange(len(wl)))
         else:
             shift = 0.0
 
