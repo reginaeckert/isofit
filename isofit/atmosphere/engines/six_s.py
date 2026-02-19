@@ -80,6 +80,9 @@ def set_env():
             "Please either set the ENV to that INI value, or update the INI with the ENV via:"
         )
         Logger.warning("  isofit --path sixs $SIXS_DIR")
+        Logger.warning("SIXS DIR HACK")
+        os.environ["SIXS_DIR"] = "/home/reckert/.isofit/sixs"
+        env.sixs = "/home/reckert/.isofit/sixs"
 
 
 class SixSRT(BaseAtmosphere, Writer):
@@ -146,8 +149,15 @@ class SixSRT(BaseAtmosphere, Writer):
 
         cmd = self.rebuild_cmd(point, wlinf=self.wl[0], wlsup=self.wl[-1])
 
+<<<<<<< HEAD:isofit/atmosphere/engines/six_s.py
         if not self.config.configure_and_exit:
             call = subprocess.run(cmd, shell=True, capture_output=True)
+=======
+        if not self.engine_config.rte_configure_and_exit:
+            myenv = os.environ.copy()
+            myenv["SIXS_DIR"] = "/home/reckert/.isofit/sixs"
+            call = subprocess.run(cmd, shell=True, capture_output=True,env=myenv)
+>>>>>>> a05a20cb (SIXS hack to get the correct SIXS to read in.):isofit/radiative_transfer/engines/six_s.py
             if call.stdout:
                 Logger.error(call.stdout.decode())
 
