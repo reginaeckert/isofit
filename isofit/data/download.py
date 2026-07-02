@@ -6,7 +6,9 @@ import io
 import json
 import os
 import shutil
+import ssl
 import tarfile
+import urllib.error
 import urllib.request
 from email.message import EmailMessage
 from pathlib import Path
@@ -72,7 +74,17 @@ def download_file(url, dstname=None, overwrite=True):
     outfile : str
         Output downloaded filepath
     """
-    response = urllib.request.urlopen(url)
+    try:
+        response = urllib.request.urlopen(url)
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, ssl.SSLError):
+            print(
+                f"SSL verification failed for {url}. Retrying with unverified context."
+            )
+            context = ssl._create_unverified_context()
+            response = urllib.request.urlopen(url, context=context)
+        else:
+            raise e
 
     total = 0
     if length := response.info()["Content-Length"]:
@@ -130,12 +142,12 @@ def unzip(file, path=None, rename=None, overwrite=False, cleanup=True):
         z.extractall(path)
 
     src = Path(path) / name
-    if rename:
-        if dst.exists():
+    if dst.exists():
+        if src != dst:
             shutil.copytree(src, dst, dirs_exist_ok=True)
             shutil.rmtree(src)
-        else:
-            shutil.move(src, dst)
+    else:
+        shutil.move(src, dst)
 
     if cleanup:
         os.remove(file)
@@ -189,11 +201,17 @@ def prepare_output(output, default, isdir=False, overwrite=False):
 
     print(f"Output as: {output}")
 
-    if not overwrite and output.exists():
-        print(
-            f"Path already exists, please remove it or set the overwrite flag if you would like to redownload"
-        )
-        return
+    if output.exists():
+        if overwrite:
+            print(
+                "Overwrite Enabled: Removing current output directory to prepare for a new download"
+            )
+            shutil.rmtree(output)
+        else:
+            print(
+                f"Path already exists, please remove it or set the overwrite flag if you would like to redownload"
+            )
+            return
 
     try:
         if isdir:
@@ -322,7 +340,7 @@ def pullFromRepo(owner, repo, tag, output, version=True, overwrite=False):
     avail : pathlib.Path
         Available path
     """
-    metadata = release_metadata("isofit", "6S", tag)
+    metadata = release_metadata(owner, repo, tag)
 
     print(f"Pulling release {metadata['tag_name']}")
     zipfile = download_file(metadata["zipball_url"], output.parent / f"{repo}.zip")

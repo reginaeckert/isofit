@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import time
 
+import numba
 import numpy as np
 from scipy.interpolate import interp1d
 from spectral.io import envi
@@ -92,11 +93,12 @@ def construct_full_state(full_config):
     instrument_states = instrument.statevec_names
 
     # Pull the rt names from the config. Seems to be most commonly present.
-    rt_config = full_config.forward_model.radiative_transfer
+    atmosphere_config = full_config.forward_model.atmosphere
 
-    rt_states = vars(rt_config.radiative_transfer_engines[0])["statevector_names"]
+    rt_states = atmosphere_config.statevector_names
     if not rt_states:
-        rt_states = sorted(rt_config.radiative_transfer_engines[0].lut_names.keys())
+        lut_names = atmosphere_config.lut_names or atmosphere_config.lut_grid
+        rt_states = sorted(lut_names.keys()) if lut_names else []
 
     # Check for config type
     if full_config.forward_model.surface.multi_surface_flag:
@@ -280,40 +282,49 @@ def update_config_for_surface(config, surface_class_str, clouds=True):
     # Experimental: added statevector elements
     for key, value in isurface.get("rt_statevector_elements", {}).items():
         # Add the statevector params
-        config.forward_model.radiative_transfer.statevector.surface_elevation_km = (
+        config.forward_model.atmosphere.statevector.surface_elevation_km = (
             StateVectorElementConfig(value)
         )
 
         # Add the statevector names
-        config.forward_model.radiative_transfer.radiative_transfer_engines[
-            0
-        ].statevector_names.append(key)
+        config.forward_model.atmosphere.statevector_names.append(key)
 
     return config
 
 
-def match_statevector(
-    state_data: np.array, full_statevec: list, fm_statevec: list, null_value=-9999.0
-):
+def match_statevector(full_statevec: list, fm_statevec: list):
     """
     A multi-class surface requires some merging across statevectors
     of different length. This function maps the fm-specific state
     to the io-state that captures all state elements present in the
     image. The full_state will record a Non
     Args:
-        state_data: (n,) numpy array with the fm-specific state vector
         full_statevec: [m] list of state-names of the image-universal combined statevector
         fm_statevec: [n] list of state-names of the fm-specific state vector
-        null_value: (optional) value to fill in the statevector elements that aren't present at a pixel
     returns:
-        full_state: (np.array) Populated full state with null_values in missing elements
+        idx: list(int) mapping for which statevector elements are present in fm
+        miss: list(int) mapping for non-present statevector elements
+
     """
-    full_state = np.zeros((len(full_statevec))) + null_value
     idx = []
     for fm_name in fm_statevec:
         for i, full_name in enumerate(full_statevec):
             if fm_name == full_name:
                 idx.append(i)
-    full_state[idx] = state_data
 
-    return full_state
+    rang = set([i for i in range(len(full_statevec))])
+    idx_rng = set(sorted(idx))
+    miss = sorted(list(rang - idx_rng))
+
+    return idx, miss
+
+
+def fill_statevector(state_est, idx, miss, full_statevector, null_value=-9999.0):
+    """
+    Map a fm output onto a full statevector
+    """
+    output = np.empty((len(full_statevector)))
+    output[idx] = state_est
+    output[miss] = null_value
+
+    return output

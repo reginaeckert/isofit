@@ -20,6 +20,7 @@ import isofit.utils.template_construction as tmpl
 from isofit.core import isofit, units
 from isofit.core.common import envi_header
 from isofit.debug.resource_tracker import FileResources
+from isofit.atmosphere.engines.modtran import ModtranRT
 from isofit.utils import analytical_line as ALAlg
 from isofit.utils import empirical_line as ELAlg
 from isofit.utils import (
@@ -108,9 +109,11 @@ def apply_oe(
     skyview_factor=None,
     resources=False,
     retrieve_co2=False,
+    eof_path=None,
+    terrain_style="dem",
 ):
-    """\
-    Applies OE over a flightline using a radiative transfer engine. This executes
+    """
+    Applies OE over a flightline using an atmospheric radiative transfer engine. This executes
     ISOFIT in a generalized way, accounting for the types of variation that might be
     considered typical.
 
@@ -118,7 +121,6 @@ def apply_oe(
     geometry lookup tables and provide a heuristic means of determining atmospheric
     water ranges.
 
-    \b
     Parameters
     ----------
     input_radiance : str
@@ -154,8 +156,11 @@ def apply_oe(
     rdn_factors_path : str, default=None
         Specify a radiometric correction factor, if desired
     atmosphere_type : str, default="ATM_MIDLAT_SUMMER"
-        Atmospheric profile to be used for MODTRAN simulations.  Unused for other
-        radiative transfer models.
+        Atmospheric profile to be used for MODTRAN and libRadtran simulations only.
+        However, if presolve mode enabled this is used to inform max water
+        column vapor for any atmospheric radiative transfer model. Valid options include:
+        ATM_MIDLAT_SUMMER, ATM_TROPICAL, ATM_MIDLAT_WINTER,
+        ATM_SUBARC_SUMMER, ATM_SUBARC_WINTER, or ATM_US_STANDARD_1976.
     channelized_uncertainty_path : str, default=None
         Path to a wavelength-specific channelized uncertainty file - used to augment Sy in the OE formalism
     instrument_noise_path : str, default=None
@@ -246,8 +251,12 @@ def apply_oe(
         Enables the system resource tracker. Must also have the log_file set.
     retrieve_co2 : bool, default=False
         Flag to retrieve CO2 in the state vector. Only available with emulator at the moment.
+    eof_path : str, default=None
+        Add 1 or 2 Empirical Orthogonal Functions to the state vector.  File is a 1-2 column text file
+        with one number per instrument channel.
+    terrain_style : str, default=dem
+        Flag to set the terrain style.  dem uses provided obs values, flat sets the surface to the spheroid
 
-    \b
     References
     ----------
     D.R. Thompson, A. Braverman,P.G. Brodrick, A. Candela, N. Carbon, R.N. Clark,D. Connelly, R.O. Green, R.F.
@@ -255,7 +264,6 @@ def apply_oe(
     D.S. Wettergreen. Quantifying Uncertainty for Remote Spectroscopy of Surface Composition. Remote Sensing of
     Environment, 2020. doi: https://doi.org/10.1016/j.rse.2020.111898.
 
-    \b
     sRTMnet emulator:
     P.G. Brodrick, D.R. Thompson, J.E. Fahlen, M.L. Eastwood, C.M. Sarture, S.R. Lundeen, W. Olson-Duvall,
     N. Carmon, and R.O. Green. Generalized radiative transfer emulation for imaging spectroscopy reflectance
@@ -299,6 +307,14 @@ def apply_oe(
             raise ValueError(
                 "If num_neighbors has multiple elements, only --analytical_line is valid"
             )
+
+    # Load in water column upper bound polynomials
+    modtran_polynomials_dict = ModtranRT.modtran_water_upperbound_polynomials()
+    if atmosphere_type not in modtran_polynomials_dict:
+        keys = ", ".join(modtran_polynomials_dict.keys())
+        raise ValueError(
+            f"Invalid atmosphere_type '{atmosphere_type}'. Must be one of: {keys}"
+        )
 
     if os.path.isdir(working_directory) is False:
         os.mkdir(working_directory)
@@ -415,6 +431,8 @@ def apply_oe(
         skyview_factor=skyview_factor,
         subs=True if analytical_line or empirical_line else False,
         classify_multisurface=classify_multisurface,
+        dn_uncertainty_file=dn_uncertainty_file,
+        eof_path=eof_path,
     )
     paths.make_directories()
     paths.stage_files()
@@ -639,6 +657,19 @@ def apply_oe(
             else:
                 logging.info(f"Skipping {inp}, because is not a path.")
 
+    config_params = {
+        "paths": paths,
+        "n_cores": n_cores,
+        "use_superpixels": use_superpixels,
+        "surface_category": surface_category,
+        "emulator_base": emulator_base,
+        "uncorrelated_radiometric_uncertainty": uncorrelated_radiometric_uncertainty,
+        "prebuilt_lut_path": prebuilt_lut,
+        "inversion_windows": INVERSION_WINDOWS,
+        "multipart_transmittance": multipart_transmittance,
+        "segmentation_size": segmentation_size,
+        "terrain_style": terrain_style,
+    }
     if presolve:
         # write modtran presolve template
         tmpl.write_modtran_template(
@@ -656,31 +687,29 @@ def apply_oe(
             ihaze_type="AER_NONE",
         )
 
-        if emulator_base is None and prebuilt_lut is None:
-            max_water = tmpl.calc_modtran_max_water(paths)
+        if elevation_lut_grid is not None:
+            max_water_elevation = elevation_lut_grid[0]
         else:
-            max_water = 6
+            max_water_elevation = mean_elevation_km
+
+        max_water = modtran_polynomials_dict[atmosphere_type](max_water_elevation)
+
+        if use_superpixels:
+            h2o_path = paths.h2o_subs_path
+        else:
+            h2o_path = paths.h2o_working_path
 
         # run H2O grid as necessary
-        if not exists(envi_header(paths.h2o_subs_path)) or not exists(
-            paths.h2o_subs_path
-        ):
+        if not exists(envi_header(h2o_path)) or not exists(h2o_path):
             # Write the presolve connfiguration file
             h2o_grid = np.linspace(0.2, max_water - 0.01, 10).round(2)
             logging.info(f"Pre-solve H2O grid: {h2o_grid}")
             logging.info("Writing H2O pre-solve configuration file.")
-            tmpl.build_presolve_config(
-                paths=paths,
+
+            tmpl.build_config(
                 h2o_lut_grid=h2o_grid,
-                n_cores=n_cores,
-                use_superpixels=use_superpixels,
-                surface_category=surface_category,
-                emulator_base=emulator_base,
-                uncorrelated_radiometric_uncertainty=uncorrelated_radiometric_uncertainty,
-                dn_uncertainty_file=dn_uncertainty_file,
-                prebuilt_lut_path=prebuilt_lut,
-                inversion_windows=INVERSION_WINDOWS,
-                multipart_transmittance=multipart_transmittance,
+                presolve=True,
+                **config_params,
             )
             """Currently not running presolve with either
             multisurface-mode or topography mode. Could easily change
@@ -705,7 +734,7 @@ def apply_oe(
         else:
             logging.info("Existing h2o-presolve solutions found, using those.")
 
-        h2o = envi.open(envi_header(paths.h2o_subs_path))
+        h2o = envi.open(envi_header(h2o_path))
         # Find the band that is H2O. Should be stable with constant H2O name
         h2o_band = [
             i for i, name in enumerate(h2o.metadata["band names"]) if name == "H2OSTR"
@@ -753,46 +782,53 @@ def apply_oe(
         )
 
         logging.info("Writing main configuration file.")
-        tmpl.build_main_config(
-            paths=paths,
-            lut_params=lut_params,
+
+        # add aerosol elements from climatology
+        aerosol_state_vector, aerosol_lut_grid, aerosol_model_path = (
+            tmpl.load_climatology(
+                paths.aerosol_climatology,
+                mean_latitude,
+                mean_longitude,
+                dt,
+                lut_params=lut_params,
+            )
+        )
+        config_params["aerosol_model_file"] = aerosol_model_path
+        config_params["aerosol_lut_grid"] = aerosol_lut_grid
+        config_params["aerosol_state_vector"] = aerosol_state_vector
+
+        for gridkey, grid, mean in zip(
+            [
+                "elevation_lut_grid",
+                "to_sensor_zenith_lut_grid",
+                "to_sun_zenith_lut_grid",
+                "relative_azimuth_lut_grid",
+            ],
+            [
+                elevation_lut_grid,
+                to_sensor_zenith_lut_grid,
+                to_sun_zenith_lut_grid,
+                relative_azimuth_lut_grid,
+            ],
+            [
+                mean_elevation_km,
+                mean_to_sensor_zenith,
+                mean_to_sun_zenith,
+                mean_relative_azimuth,
+            ],
+        ):
+
+            config_params[gridkey] = grid if grid is not None else [mean]
+
+        config_params["multiple_restarts"] = (multiple_restarts,)
+        config_params["pressure_elevation"] = pressure_elevation
+        if retrieve_co2:
+            config_params["co2_lut_grid"] = lut_params.co2_range
+            config_params["retrieve_co2"] = True
+
+        tmpl.build_config(
             h2o_lut_grid=h2o_lut_grid,
-            elevation_lut_grid=(
-                elevation_lut_grid
-                if elevation_lut_grid is not None
-                else [mean_elevation_km]
-            ),
-            to_sensor_zenith_lut_grid=(
-                to_sensor_zenith_lut_grid
-                if to_sensor_zenith_lut_grid is not None
-                else [mean_to_sensor_zenith]
-            ),
-            to_sun_zenith_lut_grid=(
-                to_sun_zenith_lut_grid
-                if to_sun_zenith_lut_grid is not None
-                else [mean_to_sun_zenith]
-            ),
-            relative_azimuth_lut_grid=(
-                relative_azimuth_lut_grid
-                if relative_azimuth_lut_grid is not None
-                else [mean_relative_azimuth]
-            ),
-            mean_latitude=mean_latitude,
-            mean_longitude=mean_longitude,
-            dt=dt,
-            use_superpixels=use_superpixels,
-            n_cores=n_cores,
-            surface_category=surface_category,
-            emulator_base=emulator_base,
-            uncorrelated_radiometric_uncertainty=uncorrelated_radiometric_uncertainty,
-            dn_uncertainty_file=dn_uncertainty_file,
-            multiple_restarts=multiple_restarts,
-            segmentation_size=segmentation_size,
-            pressure_elevation=pressure_elevation,
-            prebuilt_lut_path=prebuilt_lut,
-            inversion_windows=INVERSION_WINDOWS,
-            multipart_transmittance=multipart_transmittance,
-            retrieve_co2=retrieve_co2,
+            **config_params,
         )
 
         if config_only:
@@ -866,7 +902,7 @@ def apply_oe(
 
 
 # Input arguments
-@click.command(name="apply_oe", help=apply_oe.__doc__, no_args_is_help=True)
+@click.command(name="apply_oe", no_args_is_help=True)
 @click.argument("input_radiance")
 @click.argument("input_loc")
 @click.argument("input_obs")
@@ -909,6 +945,8 @@ def apply_oe(
 @click.option("--skyview_factor", type=str, default=None)
 @click.option("-r", "--resources", is_flag=True, default=False)
 @click.option("--retrieve_co2", is_flag=True, default=False)
+@click.option("--eof_path", default=None)
+@click.option("--terrain_style", default="dem", type=click.Choice(["dem", "flat"]))
 @click.option(
     "--debug-args",
     help="Prints the arguments list without executing the command",
@@ -937,6 +975,8 @@ def cli(debug_args, profile, **kwargs):
 
     print("Done")
 
+
+cli.__doc_source__ = apply_oe
 
 if __name__ == "__main__":
     raise NotImplementedError(

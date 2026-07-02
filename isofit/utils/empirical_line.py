@@ -32,7 +32,7 @@ from spectral.io import envi
 from isofit import ray
 from isofit.configs import configs
 from isofit.core.common import envi_header
-from isofit.core.fileio import write_bil_chunk, initialize_output
+from isofit.core.fileio import initialize_output, write_bil_chunk
 from isofit.core.instrument import Instrument
 
 
@@ -488,9 +488,7 @@ def empirical_line(
     output_metadata["interleave"] = "bil"
     output_metadata["wavelength_unts"] = "Nanometers"
     isofit_version = iconfig.implementation.isofit_version
-    engine_name = iconfig.forward_model.radiative_transfer.radiative_transfer_engines[
-        0
-    ].engine_name
+    engine_name = iconfig.forward_model.atmosphere.engine_name
     output_metadata["description"] = (
         f"L2A empirical line per-pixel surface retrieval (segmentation_size={segmentation_size}, engine={engine_name}, isofit_version={isofit_version})"
     )
@@ -515,7 +513,6 @@ def empirical_line(
     start_time = time.time()
     rayargs = {
         "ignore_reinit_error": iconfig.implementation.ray_ignore_reinit_error,
-        "local_mode": n_cores == 1,
         "address": iconfig.implementation.ip_head,
         "_temp_dir": iconfig.implementation.ray_temp_dir,
         "include_dashboard": iconfig.implementation.ray_include_dashboard,

@@ -75,7 +75,7 @@ class Config(BaseConfigSection):
         self._forward_model_type = ForwardModelConfig
         self.forward_model = ForwardModelConfig({})
         """ForwardModelConfig: forward_model config. Holds information about surface models,
-        radiative transfer models, and the instrument.
+        atmosphere radiative transfer models, and the instrument.
         """
 
         self._implementation_type = ImplementationConfig
@@ -93,8 +93,11 @@ class Config(BaseConfigSection):
         """
         logging.info("Checking config sections for configuration issues")
 
-        errors = self.check_config_validity()
+        errors, warnings = self.check_config_validity()
         errors.extend(self.check_inter_section_validity())
+
+        for w in warnings:
+            logging.warning(w)
 
         for e in errors:
             logging.error(e)
@@ -151,9 +154,9 @@ def create_new_config(config_file: str) -> Config:
         with open(config_file, "r") as f:
             # pdb.set_trace()
             config_dict = yaml.safe_load(f)
-    except:
+    except Exception as e:
         raise IOError(
-            "Unexpected configuration file time, only json and yaml supported"
+            f"Unexpected configuration file time, only json and yaml supported:\n {e}"
         )
 
     configdir, f = os.path.split(os.path.abspath(config_file))

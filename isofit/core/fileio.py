@@ -34,12 +34,13 @@ from isofit.core import units
 from isofit.core.common import (
     envi_header,
     eps,
+    load_esd,
     load_spectrum,
     load_wavelen,
     resample_spectrum,
 )
 from isofit.core.geometry import Geometry
-from isofit.core.multistate import match_statevector
+from isofit.core.multistate import fill_statevector
 from isofit.data import env
 from isofit.inversion.inverse_simple import invert_algebraic
 
@@ -266,6 +267,7 @@ class SpectrumFile:
                     self.file = envi.open(envi_header(fname))
 
             self.open_map_with_retries()
+            logging.debug(self.memmap.shape)
 
     def open_map_with_retries(self):
         """Try to open a memory map, handling Beowulf I/O issues."""
@@ -372,11 +374,7 @@ class IO:
         self.n_rows = 1
         self.n_cols = 1
         self.bbl = "{" + ",".join([str(1) for n in range(len(self.meas_wl))]) + "}"
-        self.engine_name = (
-            config.forward_model.radiative_transfer.radiative_transfer_engines[
-                0
-            ].engine_name
-        )
+        self.engine_name = config.forward_model.atmosphere.engine_name
 
         # Use the pre-defined full statevec
         if len(full_statevec):
@@ -458,7 +456,10 @@ class IO:
             self.radiance_correction, wl = load_spectrum(filename)
 
         # Load the earth sun distance data
-        self.esd = self.load_esd()
+        self.esd = load_esd()
+
+        # coszen stored as scalar in the LUT
+        self.coszen = float(forward.atmosphere.lut["coszen"].values)
 
     def get_components_at_index(self, row: int, col: int) -> InputData:
         """
@@ -525,6 +526,8 @@ class IO:
             esd=self.esd,
             bg_rfl=data["background_reflectance_file"],
             svf=data["skyview_factor_file"],
+            coszen=self.coszen,
+            full_config=self.config,
         )
 
         self.current_input_data.geom = geom
@@ -638,8 +641,8 @@ class IO:
             ############ Start with all of the 'independent' calculations
             if "estimated_state_file" in self.output_datasets:
                 # state_est transformed to reflect io.full_statevec
-                to_write["estimated_state_file"] = match_statevector(
-                    state_est, self.full_statevec, fm.statevec
+                to_write["estimated_state_file"] = fill_statevector(
+                    state_est, fm.full_idx, fm.full_miss, self.full_statevec
                 )
 
             if "path_radiance_file" in self.output_datasets:
@@ -665,8 +668,11 @@ class IO:
 
             if "posterior_uncertainty_file" in self.output_datasets:
                 S_hat, K, G = iv.calc_posterior(state_est, geom, meas)
-                to_write["posterior_uncertainty_file"] = match_statevector(
-                    np.sqrt(np.diag(S_hat)), self.full_statevec, fm.statevec
+                to_write["posterior_uncertainty_file"] = fill_statevector(
+                    np.sqrt(np.diag(S_hat)),
+                    fm.full_idx,
+                    fm.full_miss,
+                    self.full_statevec,
                 )
 
             ############ Now proceed to the calcs where they may be some overlap
@@ -728,9 +734,7 @@ class IO:
                 for item in self.output_datasets
             ):
                 rfl_alg_opt, coeffs = invert_algebraic(
-                    fm.surface,
-                    fm.RT,
-                    fm.instrument,
+                    fm,
                     x_surface,
                     x_RT,
                     x_instrument,
@@ -745,14 +749,12 @@ class IO:
 
             if "atmospheric_coefficients_file" in self.output_datasets:
                 rhoatm, sphalb, L_tot, transup, L_Up = coeffs
-                verified_geom = geom.verify(fm.RT.coszen)
-                coszen, cos_i = verified_geom["coszen"], verified_geom["cos_i"]
-                solar_irr = fm.RT.rt_engines[0].solar_irr
+                solar_irr = fm.atmosphere.solar_irr
 
                 atm_vars = [rhoatm, sphalb, L_tot, solar_irr]
 
                 atm = np.column_stack(
-                    atm_vars + [np.ones((len(self.meas_wl), 1)) * coszen]
+                    atm_vars + [np.ones((len(self.meas_wl), 1)) * geom.coszen]
                 )
 
                 atm = atm.T.reshape((len(self.meas_wl) * 5,))
@@ -811,11 +813,7 @@ class IO:
         )
         wl_names = [("Channel %i" % i) for i in range(len(wl_init))]
         bbl = "{" + ",".join([str(1) for n in range(len(wl_init))]) + "}"
-        engine_name = (
-            config.forward_model.radiative_transfer.radiative_transfer_engines[
-                0
-            ].engine_name
-        )
+        engine_name = config.forward_model.atmosphere.engine_name
 
         for element, element_header, element_name in zip(
             *config.output.get_output_files()
@@ -850,38 +848,6 @@ class IO:
                 engine_name=engine_name,
                 isofit_version=config.implementation.isofit_version,
             )
-
-    @staticmethod
-    def load_esd(file=None):
-        """
-        Loads an earth_sun_distance file. Defaults to the
-        [env.data]/earth_sun_distance.txt if not provided
-
-        Parameters
-        ----------
-        file : str, default=None
-            ESD file to load
-
-        Returns
-        -------
-        np.array
-            Loaded ESD. If the file fails to load, creates a default
-        """
-        if file is None:
-            file = env.path("data", "earth_sun_distance.txt")
-
-        try:
-            esd = np.loadtxt(file)
-            logging.debug(f"Loaded ESD from file: {file}")
-        except FileNotFoundError:
-            logging.warning(
-                "Earth-sun-distance file not found on system. "
-                "Proceeding without might cause some inaccuracies down the line."
-            )
-            esd = np.ones((366, 2))
-            esd[:, 0] = np.arange(1, 367, 1)
-
-        return esd
 
 
 def write_bil_chunk(

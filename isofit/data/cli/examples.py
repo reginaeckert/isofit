@@ -11,31 +11,77 @@ from isofit.data.download import download_file, prepare_output, release_metadata
 
 ESSENTIAL = False
 CMD = "examples"
-NEON_URL = "https://avng.jpl.nasa.gov/pub/PBrodrick/isofit/tutorials/subset_data.zip"
+
+# url: path to download
+Extras = {
+    "neon": {
+        "url": "https://avng.jpl.nasa.gov/pub/PBrodrick/isofit/tutorials/subset_data.zip",
+        "subpath": "NEON/data",
+    },
+    "image_cube": {
+        "url": "https://avng.jpl.nasa.gov/pub/PBrodrick/isofit/{size}_chunk.zip",
+        "subpath": "image_cube/{size}/data",
+    },
+    "lakemary": {
+        "url": "https://avng.jpl.nasa.gov/pub/PBrodrick/isofit/LakeMary.zip",
+        "subpath": "LakeMary/data",
+    },
+    "seabass": {
+        "url": "https://avng.jpl.nasa.gov/pub/PBrodrick/isofit/SeaBASS_prism_001.zip",
+        "subpath": "SeaBASS_prism_001/data",
+    },
+}
 
 
-def download_neon(examples):
+def download_extra(name, path=None, overwrite=False, **kwargs):
     """
-    Downloads the NEON dataset from https://avng.jpl.nasa.gov/pub/PBrodrick/isofit/tutorials/subset_data.zip.
+    Downloads additional data for the examples. Assumes the data is a zip.
 
     Parameters
     ----------
-    examples : Path
+    path : Path
         Path to the examples directory
+    size : str
+        Specify which of the two image_cube datasets to download.
+    overwrite : bool
+        Flag to overwrite current installed files
+    **kwargs : dict
+        Additional key-word arguments used by one or more extras. For instance,
+        image_cube uses ``size`` to format the url and output subpaths
     """
-    print("Downloading NEON data for the example")
+    if name not in Extras:
+        raise AttributeError(f"Extra {name!r} is not one of: {list(Extras)}")
 
-    output = prepare_output(examples / "NEON/data", "./neon_data")
+    extra = Extras[name]
+
+    # ImageCube is a special case that downloads two kinds
+    if name == "image_cube":
+        size = kwargs.get("size")
+        if size == "both":
+            download_extra("image_cube", path, overwrite, size="small")
+            download_extra("image_cube", path, overwrite, size="medium")
+            return
+
+        if size not in ("small", "medium"):
+            raise AttributeError(
+                f"Image cube chunk size must be either 'small' or 'medium', got: {size!r}"
+            )
+
+    output = Path(path or env.examples) / extra["subpath"].format(**kwargs)
+    output = prepare_output(output, None, overwrite=overwrite)
     if not output:
         return
 
-    zipfile = download_file(NEON_URL, output.parent / "NEON-subset-data.zip")
+    url = extra["url"].format(**kwargs)
+    zipfile = download_file(url, output.parent / f"{output.name}.zip")
 
     print(f"Unzipping {zipfile}")
-    avail = unzip(zipfile, path=output.parent, rename=output.name)
+    avail = unzip(zipfile, path=output.parent, rename=output.name, overwrite=overwrite)
+
+    print(f"Done, now available at: {avail}")
 
 
-def download(path=None, tag="latest", overwrite=False, **_):
+def download_tutorials(path=None, tag="latest", overwrite=False, **_):
     """
     Downloads the ISOFIT examples from the repository https://github.com/isofit/isofit-tutorials.
 
@@ -51,8 +97,6 @@ def download(path=None, tag="latest", overwrite=False, **_):
         Ignores unused params that may be used by other validate functions. This is to
         maintain compatibility with other functions
     """
-    print(f"Downloading ISOFIT examples")
-
     output = prepare_output(path, env.examples, overwrite=overwrite)
     if not output:
         return
@@ -70,13 +114,32 @@ def download(path=None, tag="latest", overwrite=False, **_):
     with open(output / "version.txt", "w") as file:
         file.write(metadata["tag_name"])
 
-    download_neon(output)
 
-    print(f"Done, now available at: {avail}")
+def download(path=None, overwrite=False, **_):
+    """
+    Downloads all examples
+
+    Parameters
+    ----------
+    path : str | None
+        Path to output as. If None, defaults to the ini path
+    overwrite : bool, default=False
+        Overwrite an existing installation
+    **_ : dict
+        Ignores unused params that may be used by other validate functions. This is to
+        maintain compatibility with other functions
+    """
+    print(f"Downloading ISOFIT examples")
+    download_tutorials(path=path, overwrite=overwrite)
+    download_extra("neon", path=path, overwrite=overwrite)
+    download_extra("image_cube", path=path, overwrite=overwrite, size="both")
+    download_extra("lakemary", path=path, overwrite=overwrite)
+    download_extra("seabass", path=path, overwrite=overwrite)
+
     print("[!] Be sure to build the examples for your system via `isofit build`")
 
 
-def validate(path=None, checkForUpdate=True, debug=print, error=print, **_):
+def validate_tutorials(path=None, checkForUpdate=True, debug=print, error=print, **_):
     """
     Validates an ISOFIT examples installation
 
@@ -133,6 +196,64 @@ def validate(path=None, checkForUpdate=True, debug=print, error=print, **_):
         return isUpToDate(path, debug=debug, error=error)
 
     return True
+
+
+def validate_image_cube(path=None, size="both", debug=print, error=print, **_):
+    """
+    Validates an ISOFIT image cube data installation
+
+    Parameters
+    ----------
+    path : str, default=None
+        Path to verify. If None, defaults to the ini path
+    size : "both" | "small" | "medium"
+        Which chunk size to validate
+    debug : function, default=print
+        Print function to use for debug messages, eg. logging.debug
+    error : function, default=print
+        Print function to use for error messages, eg. logging.error
+    **_ : dict
+        Ignores unused params that may be used by other validate functions. This is to
+        maintain compatibility with env.validate
+
+    Returns
+    -------
+    bool
+        True if valid, False otherwise
+
+    Notes
+    -----
+    The Github workflows watch for the string "[x]" to determine if the cache needs to
+    update the data of this module. If your module does not include this string, the
+    workflows will never detect updates.
+    """
+    if size == "both":
+        small = validate_image_cube(path, "small", debug=debug, error=error)
+        medium = validate_image_cube(path, "medium", debug=debug, error=error)
+        return small & medium
+
+    if path is None:
+        path = Path(path or env.examples) / "image_cube" / size
+
+    debug(f"Verifying path for ISOFIT {size} image cube: {path}")
+
+    sizes = {"small": "7000-7010", "medium": "7k-8k"}
+    for kind in ("loc", "obs", "rdn"):
+        file = path / "data" / f"ang20170323t202244_{kind}_{sizes[size]}"
+        if not file.exists():
+            error(
+                f"[x] ISOFIT {size} image cube data do not appear to be installed correctly"
+            )
+            error(f"[x] Missing file: {file}")
+            return False
+
+    debug("[OK] Path is valid")
+    return True
+
+
+def validate(**kwargs):
+
+    return validate_tutorials(**kwargs) and validate_image_cube(**kwargs)
 
 
 def isUpToDate(path=None, tag="latest", debug=print, error=print, **_):
@@ -199,7 +320,8 @@ def update(check=False, **kwargs):
         Additional key-word arguments to pass to download()
     """
     debug = kwargs.get("debug", print)
-    if not validate(**kwargs):
+    check = validate_tutorials(**kwargs) and validate_image_cube(**kwargs)
+    if not check:
         if not check:
             kwargs["overwrite"] = True
             debug("Executing update")
@@ -214,11 +336,33 @@ def update(check=False, **kwargs):
 @shared.overwrite
 @shared.check
 @click.option(
+    "--tutorials",
+    is_flag=True,
+    help="Downloads only the tutorials (no datasets) to the examples directory",
+)
+@click.option(
     "--neon",
     is_flag=True,
     help="Downloads only the NEON dataset to the examples directory",
 )
-def download_cli(neon, **kwargs):
+@click.option(
+    "--image_cube",
+    type=click.Choice(["both", "small", "medium"]),
+    flag_value="both",
+    default=None,
+    help="Downloads only the image_cube dataset to the examples directory",
+)
+@click.option(
+    "--lakemary",
+    is_flag=True,
+    help="Downloads only the LakeMary dataset to the examples directory",
+)
+@click.option(
+    "--seabass",
+    is_flag=True,
+    help="Downloads only the SeaBASS-PRISM dataset to the examples directory",
+)
+def download_cli(tutorials, neon, image_cube, lakemary, seabass, **kwargs):
     """\
     Downloads the ISOFIT examples from the repository https://github.com/isofit/isofit-tutorials.
 
@@ -229,13 +373,53 @@ def download_cli(neon, **kwargs):
         - `isofit download examples --path /path/examples`: Temporarily set the output location. This will not be saved in the ini and may need to be manually set.
     It is recommended to use the first style so the download path is remembered in the future.
     """
+    dl_all = True
+    path = kwargs.get("path") or env.examples
+    overwrite = kwargs.get("overwrite", False)
+
+    if tutorials:
+        download_tutorials(
+            path=path,
+            tag=kwargs.get("tag", "latest"),
+            overwrite=kwargs.get("overwrite", False),
+        )
+        dl_all = False
+
     if neon:
-        path = kwargs.get("path") or env.examples
-        download_neon(examples=Path(path))
-    elif kwargs.get("overwrite"):
-        download(**kwargs)
-    else:
-        update(**kwargs)
+        download_extra("neon", path=path, overwrite=overwrite)
+        dl_all = False
+
+    if image_cube:
+        download_extra(
+            "image_cube",
+            path=path,
+            overwrite=overwrite,
+            size=image_cube,
+        )
+        dl_all = False
+
+    if lakemary:
+        download_extra(
+            "lakemary",
+            path=path,
+            overwrite=overwrite,
+        )
+        dl_all = False
+
+    if seabass:
+        download_extra(
+            "seabass",
+            path=path,
+            overwrite=overwrite,
+        )
+        dl_all = False
+
+    # Only execute if the --[extra] flags weren't used
+    if dl_all:
+        if overwrite:
+            download(**kwargs)
+        else:
+            update(**kwargs)
 
 
 @shared.validate.command(name=CMD)
@@ -245,4 +429,5 @@ def validate_cli(**kwargs):
     """\
     Validates the installation of the ISOFIT examples as well as checks for updates
     """
-    validate(**kwargs)
+    validate_tutorials(**kwargs)
+    validate_image_cube(**kwargs)

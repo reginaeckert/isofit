@@ -133,7 +133,7 @@ def algebraic_line(
             input_locations_file=loc_file,
             segmentation_file=lbl_file,
             output_atm_file=atm_file,
-            atm_band_names=fm.RT.statevec_names,
+            atm_band_names=fm.atmosphere.statevec_names,
             nneighbors=num_neighbors,
             gaussian_smoothing_sigma=atm_sigma,
             n_cores=n_cores,
@@ -221,7 +221,7 @@ class Worker(object):
         self,
         config: configs.Config,
         fm: ForwardModel,
-        RT_state_file: str,
+        atmosphere_state_file: str,
         algebraic_rfl_file: str,
         rdn_file: str,
         loc_file: str,
@@ -250,6 +250,9 @@ class Worker(object):
         self.fm = fm
         self.iv = Inversion(self.config, self.fm)
 
+        # Define coszen for geom creation
+        self.coszen = fm.atmosphere.coszen
+
         self.rfl_bounds = np.min(fm.bounds, axis=0)[0], np.max(fm.bounds, axis=0)[1]
         logging.debug(
             f"Reflectance output will be bounded to the surface bounds: {self.rfl_bounds}"
@@ -258,7 +261,7 @@ class Worker(object):
         self.completed_spectra = 0
         self.hash_table = OrderedDict()
         self.hash_size = 500
-        self.RT_state_file = RT_state_file
+        self.atmosphere_state_file = atmosphere_state_file
         self.rdn_file = rdn_file
         self.loc_file = loc_file
         self.obs_file = obs_file
@@ -294,7 +297,7 @@ class Worker(object):
         rdn = envi.open(envi_header(self.rdn_file)).open_memmap(interleave="bip")
         loc = envi.open(envi_header(self.loc_file)).open_memmap(interleave="bip")
         obs = envi.open(envi_header(self.obs_file)).open_memmap(interleave="bip")
-        rt_state = envi.open(envi_header(self.RT_state_file)).open_memmap(
+        rt_state = envi.open(envi_header(self.atmosphere_state_file)).open_memmap(
             interleave="bip"
         )
         lbl = envi.open(envi_header(self.lbl_file)).open_memmap(interleave="bip")
@@ -317,19 +320,24 @@ class Worker(object):
                 if np.all(meas < 0):
                     continue
 
-                geom = Geometry(obs=obs[r, c, :], loc=loc[r, c, :], esd=esd)
+                # NOTE skyview factor and background reflectance are currently unused in algebraic line
+                geom = Geometry(
+                    obs=obs[r, c, :],
+                    loc=loc[r, c, :],
+                    esd=esd,
+                    coszen=self.coszen,
+                    full_config=self.config,
+                )
 
                 # "Atmospheric" state ALWAYS comes from all bands in the
                 # atm_interpolated file
-                x_RT = rt_state[r, c, :]
+                x_atmosphere = rt_state[r, c, :]
 
                 x_surface, _, x_instrument = self.fm.unpack(self.fm.init.copy())
                 rfl_est, coeffs = invert_algebraic(
-                    self.fm.surface,
-                    self.fm.RT,
-                    self.fm.instrument,
+                    self.fm,
                     x_surface,
-                    x_RT,
+                    x_atmosphere,
                     x_instrument,
                     meas,
                     geom,

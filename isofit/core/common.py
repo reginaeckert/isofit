@@ -19,6 +19,7 @@
 #
 
 import json
+import logging
 import os
 from collections import OrderedDict
 from difflib import SequenceMatcher
@@ -30,15 +31,115 @@ import numpy as np
 # sc Adding in xarray for non-gauss SRF file io
 import xarray as xr
 import xxhash
+from numba import float64, int32, njit
 from scipy.interpolate import RegularGridInterpolator
 
 from isofit.core import units
+from isofit.data import env
+
+Logger = logging.getLogger(__name__)
 
 # small value used in finite difference derivatives
 eps = 1e-5
 
 # Global variable makes it non-shared mem in ray
 Cache = {"stats": {}}
+
+
+@njit(inline="always")
+def fast_searchsorted(array, target):
+    """
+    Numba-optimized binary search to find the insertion index of a target value.
+    Same as np.searchsorted(...,side='left'), but opptimized
+
+    Args:
+        array: 1D array of floats, representing a sorted grid dimension (must be
+               monotonically increasing)
+        target: float value to locate within the grid dimension
+
+    Returns:
+        low: integer index indicating the first element greater than or equal
+             to the target.
+    """
+    low = 0
+    high = len(array) - 1
+    while low < high:
+        mid = (low + high) // 2
+        if array[mid] < target:
+            low = mid + 1
+        else:
+            high = mid
+    return low
+
+
+@njit(cache=True)
+def _numba_mlg_kernel(
+    point, grid_tuples, flat_data, strides, low_indices, deltas, num_channels
+):
+    """
+    Numba-accelerated n-dimensional multilinear interpolator kernel. Performs
+    linear interpolation across a multi-dimensional look-up table for a single
+    point, outputting a vector of values.
+
+    Args:
+        point: 1D array of floats, representing the coordinate to interpolate
+               within the n-dimensional grid.
+        grid_tuples: Tuple of 1D arrays of floats, where each array defines the
+                     sorted grid points for a single dimension.
+        flat_data: 1D array of floats, the flattened n-dimensional data array.
+        strides: 1D array of integers, the strides for each dimension in the
+                 flattened data array.
+        low_indices: 1D array of integers, pre-allocated buffer for storing the
+                     lower indices for each dimension.
+        deltas: 1D array of floats, pre-allocated buffer for storing the
+                interpolation weights for each dimension.
+        num_channels: Integer, the number of channels in the output vector.
+              correspond to grid_tuples and the last dimension contains the
+              output vector (channels).
+
+    Returns:
+        result: 1D array of floats, the interpolated output vector of length
+                equal to data.shape[-1].
+    """
+    dims = len(point)
+
+    # Bound the search
+    for i in range(dims):
+        grid = grid_tuples[i]
+        p = point[i]
+
+        if p <= grid[0]:
+            low_indices[i] = 0
+            deltas[i] = 0.0
+        elif p >= grid[-1]:
+            low_indices[i] = len(grid) - 2
+            deltas[i] = 1.0
+        else:
+            idx = fast_searchsorted(grid, p) - 1
+            if idx < 0:
+                idx = 0
+            low_indices[i] = idx
+            deltas[i] = (p - grid[idx]) / (grid[idx + 1] - grid[idx])
+
+    # Do the actual interpolation, using pre-calculated strides
+    num_corners = 1 << dims
+    result = np.zeros(num_channels, dtype=np.float64)
+    for c in range(num_corners):
+        weight = 1.0
+        flat_idx = 0
+        for d in range(dims):
+            if (c >> d) & 1:
+                weight *= deltas[d]
+                flat_idx += (low_indices[d] + 1) * strides[d]
+            else:
+                weight *= 1.0 - deltas[d]
+                flat_idx += low_indices[d] * strides[d]
+
+        start = flat_idx
+        end = start + num_channels
+        result += flat_data[start:end] * weight
+
+    return result
 
 
 class VectorInterpolator:
@@ -49,14 +150,15 @@ class VectorInterpolator:
         grid_input: list of lists of floats, indicating the gridpoint elements in each grid dimension
         data_input: n dimensional array of radiative transfer engine outputs (each dimension size corresponds to the
                     given grid_input list length, with the last dimensions equal to the number of sensor channels)
-        version: version to use: 'rg' for scipy RegularGridInterpolator, 'mlg' for multilinear grid interpolator
+        version: version to use: 'rg' for scipy RegularGridInterpolator, 'mlg' for multilinear grid interpolator,
+                 'mlg_numba' for numba-accelerated multilinear grid interpolator
     """
 
     def __init__(
         self,
         grid_input: List[List[float]],
         data_input: np.array,
-        version="mlg",
+        version="mlg_numba",
     ):
         # Determine if this a singular unique value, if so just return that directly
         val = data_input[(0,) * data_input.ndim]
@@ -97,6 +199,35 @@ class VectorInterpolator:
                 t[1:] - t[:-1] for t in self.gridtuples
             ]  # binwidth arrays for each dimension
             self.maxbaseinds = np.array([len(t) - 1 for t in self.gridtuples])
+
+        elif version == "mlg_numba":
+            self.method = 3
+            self.grid_tuples = tuple(
+                [np.array(g, dtype=np.float64) for g in grid_input]
+            )
+            self.gridarrays = data_input.astype(np.float64)
+
+            self.dims = len(grid_input)
+            self.num_channels = self.n
+
+            # Precompute Strides for flat indexing
+            strides = np.zeros(self.dims + 1, dtype=np.int32)
+            current_stride = 1
+            for i in range(self.dims, -1, -1):
+                strides[i] = current_stride
+                current_stride *= data_input.shape[i]
+            self.strides = strides
+
+            # Pre-flatten the data array
+            self.flat_data = self.gridarrays.ravel()
+
+            # Allocate workspace buffers to prevent Numba heap allocation, which does bad things with Ray
+            self.low_indices_workspace = np.zeros(self.dims, dtype=np.int32)
+            self.deltas_workspace = np.zeros(self.dims, dtype=np.float64)
+
+            # Warm-up call to force numba to compile before runtime
+            dummy_point = np.array([g[0] for g in self.grid_tuples], dtype=np.float64)
+            self(dummy_point)
 
         else:
             raise AttributeError(f"Unknown interpolator version: {version!r}")
@@ -197,6 +328,23 @@ class VectorInterpolator:
             return self._interpolate(*args, **kwargs)
         elif self.method == 2:
             return self._multilinear_grid(*args, **kwargs)
+        if self.method == 3:
+
+            # Ray's plasma-store makes zero-copy arrays read-only, so  do a check and
+            # make a local copy on this worker if needed.
+            if not self.low_indices_workspace.flags.writeable:
+                self.low_indices_workspace = np.zeros(self.dims, dtype=np.int32)
+                self.deltas_workspace = np.zeros(self.dims, dtype=np.float64)
+
+            return _numba_mlg_kernel(
+                args[0],
+                self.grid_tuples,
+                self.flat_data,
+                self.strides,
+                self.low_indices_workspace,
+                self.deltas_workspace,
+                self.num_channels,
+            )
 
 
 def load_wavelen(wavelength_file: str):
@@ -372,6 +520,30 @@ def recursive_replace(obj, key, val) -> None:
     elif any(isinstance(obj, t) for t in (list, tuple)):
         for item in obj:
             recursive_replace(item, key, val)
+
+
+def recursive_get(obj, key) -> list:
+    """Find all occurences of a key within a nested struct.
+
+    Args:
+        obj: object to seach within
+        key: key to find
+
+    Returns:
+        list: values at those key locations
+    """
+    results = []
+    if isinstance(obj, dict):
+        if key in obj:
+            results.append(obj[key])
+        for value in obj.values():
+            results.extend(recursive_get(value, key))
+
+    elif isinstance(obj, list):
+        for item in obj:
+            results.extend(recursive_get(item, key))
+
+    return results
 
 
 def get_absorption(wl: np.array, absfile: str) -> (np.array, np.array):
@@ -874,3 +1046,54 @@ def compare(a, b, threshold=0.8, not_same=True):
                 matches.setdefault(x, []).append(y)
 
     return matches
+
+
+def saveDataset(file: str, ds: xr.Dataset) -> None:
+    """
+    Handles saving an xarray.Dataset to a NetCDF file for ISOFIT. Will detect if the
+    point dim needs to be unstacked before saving (regular grids) or not (irregular)
+
+    Parameters
+    ----------
+    file: str
+        Path to save the `ds` object to. This will be a NetCDF, recommended extension
+        is `.nc`
+    ds: xarray.Dataset
+        Data object to save
+    """
+    if "MultiIndex" in str(ds.indexes["point"]):
+        ds = ds.unstack("point")
+
+    ds.to_netcdf(file)
+
+
+def load_esd(file=None):
+    """
+    Loads an earth_sun_distance file. Defaults to the
+    [env.data]/earth_sun_distance.txt if not provided
+
+    Parameters
+    ----------
+    file : str, default=None
+        ESD file to load
+
+    Returns
+    -------
+    np.array
+        Loaded ESD. If the file fails to load, creates a default
+    """
+    if file is None:
+        file = env.path("data", "earth_sun_distance.txt")
+
+    try:
+        esd = np.loadtxt(file)
+        logging.debug(f"Loaded ESD from file: {file}")
+    except FileNotFoundError:
+        logging.warning(
+            "Earth-sun-distance file not found on system. "
+            "Proceeding without might cause some inaccuracies down the line."
+        )
+        esd = np.ones((366, 2))
+        esd[:, 0] = np.arange(1, 367, 1)
+
+    return esd

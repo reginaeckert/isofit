@@ -32,14 +32,14 @@ from spectral.io import envi
 
 from isofit import ray
 from isofit.configs import configs
-from isofit.core.common import envi_header, load_spectrum, load_wavelen
-from isofit.core.fileio import IO, initialize_output, write_bil_chunk
+from isofit.core.common import envi_header, load_esd, load_spectrum, load_wavelen
+from isofit.core.fileio import initialize_output, write_bil_chunk
 from isofit.core.forward import ForwardModel
 from isofit.core.geometry import Geometry
 from isofit.core.multistate import (
     construct_full_state,
+    fill_statevector,
     index_spectra_by_surface,
-    match_statevector,
     update_config_for_surface,
 )
 from isofit.inversion.inverse_simple import (
@@ -146,8 +146,8 @@ def analytical_line(
         full_idx_surface,
         full_idx_surf_rfl,
         _,
-        full_idx_RT,
-        _,
+        full_idx_atmosphere,
+        full_idx_instrument,
     ) = construct_full_state(config)
 
     # Perform the atmospheric interpolation
@@ -158,7 +158,7 @@ def analytical_line(
             input_locations_file=loc_file,
             segmentation_file=lbl_file,
             output_atm_file=atm_file,
-            atm_band_names=[full_statevector[i] for i in full_idx_RT],
+            atm_band_names=[full_statevector[i] for i in full_idx_atmosphere],
             nneighbors=n_atm_neighbors,
             gaussian_smoothing_sigma=smoothing_sigma,
             n_cores=n_cores,
@@ -197,9 +197,7 @@ def analytical_line(
     ]
     bbl = "{" + ",".join([f"{x}" for x in outside_ret_windows]) + "}"
     num_bands = len(full_idx_surf_rfl)
-    engine_name = config.forward_model.radiative_transfer.radiative_transfer_engines[
-        0
-    ].engine_name
+    engine_name = config.forward_model.atmosphere.engine_name
     isofit_version = config.implementation.isofit_version
     rfl_output = initialize_output(
         output_metadata,
@@ -275,7 +273,7 @@ def analytical_line(
     index_pairs[:, 1] = meshgrid[1].flatten(order="f")
     del meshgrid
 
-    cache_RT = None
+    cache_atmosphere = None
     input_config = deepcopy(config)
     surface_index = index_spectra_by_surface(
         input_config, index_pairs, force_full_res=True
@@ -284,7 +282,8 @@ def analytical_line(
         # Handle multisurface
         config = update_config_for_surface(deepcopy(input_config), surface_class_str)
 
-        fm = ForwardModel(config, cache_RT)
+        fm = ForwardModel(config, cache_atmosphere)
+        fm.match_statevector(full_statevector)
 
         # Initialize workers
         wargs = [ray.put(obj) for obj in (config, fm)]
@@ -294,7 +293,7 @@ def analytical_line(
             full_statevector,
             full_idx_surface,
             full_idx_surf_rfl,
-            full_idx_RT,
+            full_idx_atmosphere,
             rdn_file,
             loc_file,
             obs_file,
@@ -330,9 +329,9 @@ def analytical_line(
             workers.map_unordered(lambda a, b: a.run_chunks.remote(b), line_breaks)
         )
 
-        # Cache RT
+        # Cache atmosphere
         if not i:
-            cache_RT = fm.RT
+            cache_atmosphere = fm.atmosphere
 
         del fm
 
@@ -356,7 +355,7 @@ class Worker(object):
         full_statevector: list,
         full_idx_surface: np.array,
         full_idx_surf_rfl: np.array,
-        full_idx_RT: np.array,
+        full_idx_atmosphere: np.array,
         rdn_file: str,
         loc_file: str,
         obs_file: str,
@@ -398,12 +397,12 @@ class Worker(object):
         self.class_idx_pairs = class_idx_pairs
 
         # Will fail if env.data isn't set up
-        self.esd = IO.load_esd()
+        self.esd = load_esd()
 
         self.full_statevector = full_statevector
         self.full_idx_surface = full_idx_surface
         self.full_idx_surf_rfl = full_idx_surf_rfl
-        self.full_idx_RT = full_idx_RT
+        self.full_idx_atmosphere = full_idx_atmosphere
         self.n_rfl_bands = len(full_idx_surf_rfl)
         self.n_non_rfl_bands = len(full_idx_surface) - len(full_idx_surf_rfl)
 
@@ -451,6 +450,9 @@ class Worker(object):
 
         # How many iterations to use for invert_analytical
         self.num_iter = num_iter
+
+        # Define coszen for geom creation
+        self.coszen = fm.atmosphere.coszen
 
         if config.input.radiometry_correction_file is not None:
             self.radiance_correction, wl = load_spectrum(
@@ -520,17 +522,30 @@ class Worker(object):
                 loc=self.loc[r, c, :],
                 esd=self.esd,
                 svf=self.svf[r, c] if len(self.svf) else 1,
+                coszen=self.coszen,
+                full_config=self.config,
             )
 
             # "Atmospheric" state ALWAYS comes from all bands in the
             # atm_interpolated file
-            x_RT = self.rt_state[r, c, :]
+            x_atmosphere = self.rt_state[r, c, :]
 
+            # TODO depricate this iv_idx. Abstract the indexing a bit more
+            # s.t. we can smooth any statevector element by specifying idx
+            # iv_idx here is a relic from a version that
+            # achieved this by using atm_band_names in atm_interpolation
+            # need to improve that implementation
             iv_idx = self.fm.surface.analytical_iv_idx
-            sub_state = self.subs_state[int(self.lbl[r, c, 0]), 0, iv_idx]
 
-            # Note: concatenation only works with the correct indexing.
-            sub_state = np.concatenate([sub_state, x_RT])
+            # Populate the "background" superpixel
+            lbl_idx = int(self.lbl[r, c, 0])
+            sub_state = np.zeros(self.fm.nstate)
+            sub_state[self.fm.idx_surface] = self.subs_state[lbl_idx, 0, iv_idx]
+            sub_state[self.fm.idx_atmosphere] = x_atmosphere
+            sub_state[self.fm.idx_instrument] = self.subs_state[
+                lbl_idx, 0, self.fm.idx_instrument
+            ]
+            # Enforce non-NaN
             sub_state[np.isnan(sub_state)] = self.fm.init[np.isnan(sub_state)]
 
             # Build statevector to use for initialization.
@@ -541,16 +556,14 @@ class Worker(object):
             # SIMPLE uses invert_simple for rfl and non_rfl surface elements
             if self.initializer == "superpixel":
                 x0 = sub_state
-                x0[self.fm.idx_RT] = x_RT
+                x0[self.fm.idx_atmosphere] = x_atmosphere
 
             elif self.initializer == "algebraic":
                 x_surface, _, x_instrument = self.fm.unpack(self.fm.init.copy())
                 rfl_est, coeffs = invert_algebraic(
-                    self.fm.surface,
-                    self.fm.RT,
-                    self.fm.instrument,
+                    self.fm,
                     x_surface,
-                    x_RT,
+                    x_atmosphere,
                     x_instrument,
                     meas,
                     geom,
@@ -561,14 +574,14 @@ class Worker(object):
                 x0 = np.concatenate(
                     [
                         rfl_est,
-                        x_RT,
+                        x_atmosphere,
                         x_instrument,
                     ]
                 )
 
             elif self.initializer == "simple":
                 x0 = invert_simple(self.fm, meas, geom)
-                x0[self.fm.idx_RT] = x_RT
+                x0[self.fm.idx_atmosphere] = x_atmosphere
 
             else:
                 raise ValueError("No valid initializer given for AOE algorithm")
@@ -583,19 +596,17 @@ class Worker(object):
                 geom,
                 np.copy(x0),
                 sub_state,
-                self.num_iter,
-                self.hash_table,
-                self.hash_size,
+                num_iter=self.num_iter,
             )
             state_est = states[-1]
 
-            full_state_est = match_statevector(
-                state_est, self.full_statevector, self.fm.statevec
+            full_state_est = fill_statevector(
+                state_est, self.fm.full_idx, self.fm.full_miss, self.full_statevector
             )
             output_rfl[r - start_line, c, :] = full_state_est[self.full_idx_surf_rfl]
 
-            full_unc_est = match_statevector(
-                unc, self.full_statevector, self.fm.statevec
+            full_unc_est = fill_statevector(
+                unc, self.fm.full_idx, self.fm.full_miss, self.full_statevector
             )
             output_rfl_unc[r - start_line, c, :] = full_unc_est[self.full_idx_surf_rfl]
 

@@ -18,16 +18,16 @@
 # Author: David R Thompson, david.r.thompson@jpl.nasa.gov
 
 import logging
-from os.path import join, isfile, isdir
+import os
 import shutil
 import time
 import warnings
+from os.path import isdir, isfile, join
 
 import click
+import netCDF4 as nc
 import numpy as np
 import ray
-import xarray as xr
-import zarr
 from spectral.io import envi
 
 from isofit.core.common import envi_header, eps
@@ -52,17 +52,17 @@ def skyview(
 ):
     """\
     Applies sky view factor calculation for a given projected DEM or DSM. Much of this code was borrowed from ARS Topo-Calc.
-    The key thing here was to create a python-only, rasterio-free port of this that could be used within ISOFIT. We also included 
+    The key thing here was to create a python-only, rasterio-free port of this that could be used within ISOFIT. We also included
     improvements that are current in Jeff Dozier's horizon method in Matlab (https://github.com/DozierJeff/Topographic-Horizons).
     Following suggestions from Dozier (2021), multiprocessing is leveraged here w.r.t. to n_angles rotating the image. As default,
     sky view is computed with n angles = 64 which in most cases is of sufficient accuracy to resolve but more angles may be used.
-    
+
     Optionally to this horizon based method, one can pass method="slope" to compute a faster estimate that may be sufficent for regions with lower relief.
-    The slope based estimate is simply, svf = cos^2(slope/2). 
-    
-    Yet another option is to pass an ISOFIT "OBS" or "LOC" file as input and using the obs_or_loc arg. 
-    OBS files have slope data and can be used for method='slope' only. LOC files have elevation data and can be used for method='slope'. 
-    One can also use the full horizon method on the LOC file although this is not recommended because the edges miss information 
+    The slope based estimate is simply, svf = cos^2(slope/2).
+
+    Yet another option is to pass an ISOFIT "OBS" or "LOC" file as input and using the obs_or_loc arg.
+    OBS files have slope data and can be used for method='slope' only. LOC files have elevation data and can be used for method='slope'.
+    One can also use the full horizon method on the LOC file although this is not recommended because the edges miss information
     (a warning will be triggered in this case).
 
     \b
@@ -79,18 +79,18 @@ def skyview(
         If 'loc' is selected it well select the elevation data from index 2. None will assume a single band elevation data is passed.
     method : str, optional
         Options are either "horizon" or "slope". Passing "horizon" runs the full computation and is recommended for very steep terrain.
-        Passing "slope"" runs the simplifed calculation of svf=cos^2(slope/2) and can be useful for more mild slopes. 
+        Passing "slope"" runs the simplifed calculation of svf=cos^2(slope/2) and can be useful for more mild slopes.
     n_angles : int, optional
         Number of angles used in horizon calculations (default is 64).
-        As a reference, n=72 computes every 5deg, n=64 every 5.6deg, n=32 every 11.25deg, etc.  
+        As a reference, n=72 computes every 5deg, n=64 every 5.6deg, n=32 every 11.25deg, etc.
     keep_horizon_files : bool, optional
-        Horizon angles are created in output_dir as a zarr data structure. False deletes files, and True keeps them. These angles are based from zenith.        
+        Horizon angles are created in output_dir as netcdfs. False deletes files, and True keeps them. These angles are based from zenith.
     logging_level : str, optional
         Logging verbosity level (default is "INFO"); similar to apply_oe.
     log_file : str or None, optional
         File path to write logs; similar to apply_oe.
     n_cores : int, optional
-        Number of CPU cores to use for parallel processing (default is 1). Only used for method="horizon". 
+        Number of CPU cores to use for parallel processing (default is 1). Only used for method="horizon".
         Note: n_cores should ideally not be larger than n_angles.
     """
     # set up logging for skyview.
@@ -185,7 +185,6 @@ def skyview(
         # Start up a ray instance for parallel work
         rayargs = {
             "ignore_reinit_error": True,
-            "local_mode": n_cores == 1,
             "address": ray_address,
             "include_dashboard": False,
             "_temp_dir": ray_temp_dir,
@@ -193,6 +192,10 @@ def skyview(
             "num_cpus": n_cores,
         }
         ray.init(**rayargs)
+
+        horizon_dir = join(output_directory, "horizon_files")
+        if not isdir(horizon_dir):
+            os.makedirs(horizon_dir)
 
         # prep data for horizon method
         slope, aspect = gradient_d8(
@@ -204,9 +207,6 @@ def skyview(
 
         # -180 is North
         angles = np.linspace(-180, 180, num=n_angles, endpoint=False)
-
-        # Create zarr.
-        init_horizon(output_directory, angles, (dem_data.shape[0], dem_data.shape[1]))
 
         # Share needed ray objects
         dem_ray = ray.put(dem_data)
@@ -221,7 +221,7 @@ def skyview(
                 spacing=resolution,
                 aspect=aspect_ray,
                 tan_slope=tan_slope_ray,
-                output_directory=output_directory,
+                output_directory=horizon_dir,
                 logging_level=logging_level,
                 log_file=log_file,
             )
@@ -232,7 +232,8 @@ def skyview(
         # set up integral for skyview
         qIntegrand = np.zeros_like(dem_data, dtype=np.float32)
         for a in angles:
-            h = load_horizon(output_directory=output_directory, angle=a)
+            file_path = join(horizon_dir, f"horizon_angle_{np.round(a,5)}.nc")
+            h = load_horizon(file_path=file_path)
             azimuth = np.radians(a)
             cos_aspect = np.cos(aspect - azimuth)
 
@@ -256,10 +257,8 @@ def skyview(
         del out_mm
 
         if not keep_horizon_files:
-            logging.info("Removing temporary horizon Zarr directories...")
-            horizon_files = join(output_directory, "horizons.zarr")
-            if isdir(horizon_files):
-                shutil.rmtree(horizon_files)
+            logging.info("Removing temporary horizon files...")
+            shutil.rmtree(horizon_dir, ignore_errors=True)
 
     else:
         err_str = "method must be either 'horizon' or 'slope'."
@@ -282,7 +281,7 @@ def horizon_worker(
     log_file,
 ):
     """
-    Each worker gets an angle and is sent to this function to compute horizons, and save to a compressed/scaled zarr file.
+    Each worker gets an angle and is sent to this function to compute horizons, and save to a compressed/scaled netcdf file.
     """
     # set up logging for each worker.
     logging.basicConfig(
@@ -306,75 +305,57 @@ def horizon_worker(
     return
 
 
-def init_horizon(output_directory, angles, shape):
-    """
-    Creates a zarr dataset for the horizon computations.
-    """
-    h_nodata = 65535
-    ds = xr.Dataset(
-        {
-            f"horizon_{np.round(a,5)}": xr.DataArray(
-                np.full(shape, h_nodata, dtype=np.uint16),
-                dims=("row", "col"),
-                attrs={
-                    "units": "radians",
-                    "scale_factor": np.pi / 65534,
-                    "add_offset": 0.0,
-                    "nodata": h_nodata,
-                },
-            )
-            for a in angles
-        }
-    )
-
-    horizon_files = join(output_directory, "horizons.zarr")
-    ds.to_zarr(
-        horizon_files,
-        mode="w",
-        consolidated=False,
-        encoding={
-            f"horizon_{np.round(a,5)}": {"dtype": "uint16", "_FillValue": h_nodata}
-            for a in angles
-        },
-    )
-    ds.close()
-
-    return
-
-
 def save_horizon(h, angle, output_directory):
     """utility function to house metadata and information for saving horizon angles"""
 
-    # scale factor
+    # Scale h to uint16 with nodata=65535
     h_nodata = 65535
     h_sf = np.pi / 65534
 
-    # apply scale factor to the data
+    # loss of data, but still accurate to ~0.003 degrees.
     h_scaled = (h / h_sf).astype(np.uint16)
-    h_scaled[(np.isnan(h)) | (h == -9999)] = h_nodata
+    h_scaled[(np.isnan(h)) | (h == -9999)] = h_nodata  # nodata
 
-    # append to the zarr dir
-    horizon_files = join(output_directory, "horizons.zarr")
-    angle_name = f"horizon_{np.round(angle, 5)}"
-    z = zarr.open(horizon_files, mode="a")
-    z[angle_name][:] = h_scaled
-
-    logging.info(f"Flushed horizon angle: {angle_name} to disk.")
+    # write h to disk (scaled data reduced ~3-5x file size.)
+    angle_to_write = np.round(angle, 5)
+    logging.info(f"Flushing horizon angle: {angle_to_write} to disk.")
+    filename = join(output_directory, f"horizon_angle_{angle_to_write}.nc")
+    with nc.Dataset(filename, "w", format="NETCDF4") as ds:
+        ds.createDimension("row", h.shape[0])
+        ds.createDimension("col", h.shape[1])
+        var = ds.createVariable(
+            "horizon",
+            "u2",
+            ("row", "col"),
+            fill_value=h_nodata,
+            zlib=True,
+            complevel=4,
+        )
+        var[:] = h_scaled
+        var.units = "radians"
+        var.long_name = "Horizon angle (radians)"
+        var.scale_factor = h_sf
+        var.add_offset = 0.0
+        var.nodata = h_nodata
+        var.note = (
+            "Values scaled as uint16 from 0 to pi radians;"
+            "convert back with np.pi / 65534 ;"
+            "65535 is nodata."
+            "NOTE: angle is from zenith."
+        )
 
     return
 
 
-def load_horizon(output_directory, angle):
-    horizon_files = join(output_directory, "horizons.zarr")
-    angle_name = f"horizon_{np.round(angle,5)}"
-    ds = xr.open_zarr(horizon_files, decode_cf=False, consolidated=False)
-    da = ds[angle_name]
-    h_nodata = da.attrs["nodata"]
-    h_sf = da.attrs["scale_factor"]
-    h_scaled = da.astype(np.float32).values
-    h_scaled[h_scaled == h_nodata] = np.nan
-    h = h_scaled * h_sf
-    ds.close()
+def load_horizon(file_path):
+    """load horizon netcdf in for skyview calc using scale factors defined in save."""
+    with nc.Dataset(file_path) as ds:
+        ds.set_auto_scale(False)
+        h_nodata = ds.variables["horizon"].nodata
+        h_sf = ds.variables["horizon"].scale_factor
+        h_scaled = ds.variables["horizon"][:].astype(np.float32)
+        h_scaled[h_scaled == h_nodata] = np.nan
+        h = h_scaled * h_sf
     return h
 
 
@@ -453,7 +434,6 @@ def create_shadow_mask(
     # Start up a ray instance for parallel work
     rayargs = {
         "ignore_reinit_error": True,
-        "local_mode": n_cores == 1,
         "address": ray_address,
         "include_dashboard": False,
         "_temp_dir": ray_temp_dir,
@@ -958,22 +938,24 @@ def skew(arr, angle, fwd=True, fill_min=True):
     line_indices = np.arange(nlines)
     o_indices = line_indices if negflag else nlines - line_indices - 1
     offsets = o_indices * slope
+
+    output_grid = np.arange(o_nsamps)
+    source_grid = np.arange(nsamps)
+
     if fwd:
         for i in range(nlines):
             offset = offsets[i]
-            output = np.arange(o_nsamps)
-            source = output - offset
+            source = output_grid - offset
             mask = (source >= 0) & (source <= nsamps - 1)
-            y_k = np.interp(source[mask], np.arange(nsamps), arr[i, :])
+            y_k = np.interp(source[mask], source_grid, arr[i, :])
             b[i, mask] = y_k
 
     else:
         for i in range(nlines):
-            source = np.arange(nsamps)
             offset = offsets[i]
-            output = source - offset
+            output = source_grid - offset
             mask = (output >= 0) & (output <= o_nsamps - 1)
-            y_k = np.interp(np.arange(o_nsamps), output[mask], arr[i, source[mask]])
+            y_k = np.interp(output_grid, output[mask], arr[i, source_grid[mask]])
             b[i, :] = y_k
 
     return b
