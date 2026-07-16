@@ -245,6 +245,7 @@ class ForwardModel:
         # if rfl passed, have to explicitly use those values
         if len(rfl):
             x_surface[self.idx_surf_rfl] = rfl
+            x[self.idx_surface] = x_surface
 
         # Call surface reflectance w.r.t. surface, upsample
         rho_dir_dir, rho_dif_dir = self.calc_rfl(x, geom)
