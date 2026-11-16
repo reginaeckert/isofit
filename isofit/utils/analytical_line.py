@@ -82,6 +82,7 @@ def analytical_line(
     logfile: str = None,
     initializer: str = "algebraic",
     segmentation_size: int = 40,
+    atm_only: bool = False
 ) -> None:
     """
     TODO: Description
@@ -164,6 +165,10 @@ def analytical_line(
             gaussian_smoothing_sigma=smoothing_sigma,
             n_cores=n_cores,
         )
+
+    if atm_only:     
+        logging.info("`atm_only` enabled, exiting early")
+        return
 
     # Get string representation of bad band list
     outside_ret_windows = np.zeros(len(full_idx_surf_rfl), dtype=int)

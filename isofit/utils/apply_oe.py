@@ -106,6 +106,7 @@ def apply_oe(
     no_min_lut_spacing=False,
     inversion_windows=None,
     config_only=False,
+    atm_only=False,
     interpolate_bad_rdn=False,
     interpolate_inplace=False,
     skyview_factor=None,
@@ -958,6 +959,7 @@ def apply_oe(
                 n_cores=n_cores,
                 smoothing_sigma=atm_sigma,
                 segmentation_size=segmentation_size,
+                atm_only=atm_only,
             )
     # Remove any other large temporary files created during ApplyOE
     if remove_bgrfl_file:
@@ -1019,6 +1021,7 @@ def apply_oe(
 @click.option("--no_min_lut_spacing", is_flag=True, default=False)
 @click.option("--inversion_windows", type=float, nargs=2, multiple=True, default=None)
 @click.option("--config_only", is_flag=True, default=False)
+@click.option("--atm_only", is_flag=True, default=False)
 @click.option("--interpolate_bad_rdn", is_flag=True, default=False)
 @click.option("--interpolate_inplace", is_flag=True, default=False)
 @click.option("--skyview_factor", type=str, default=None)
