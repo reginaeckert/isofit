@@ -158,7 +158,11 @@ def invert_algebraic(
     """
     _, rho_init = fm.surface.calc_rfl(x_surface, geom)
 
-    rho_dif_dif = geom.bg_rfl if isinstance(geom.bg_rfl, np.ndarray) else rho_init
+    rho_dif_dif = (
+        fm.upsample(fm.surface.wl, geom.bg_rfl)
+        if isinstance(geom.bg_rfl, np.ndarray)
+        else fm.upsample(fm.surface.wl, rho_init)
+    )
 
     # Get all radiance terms
     (
@@ -337,7 +341,7 @@ def invert_analytical(
         xk = dsymv(
             1,
             C_rcond,
-            (L.T @ dsymv(1, P, y) + prprod[iv_idx]),
+            (L.T @ dsymv(1, P, y, lower=1) + prprod[iv_idx]),
         )
 
         # Save trajectory step:
